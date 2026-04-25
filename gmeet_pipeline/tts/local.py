@@ -14,9 +14,7 @@ import logging
 import struct
 import uuid
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
+from typing import Optional, Union
 
 from .base import BaseTTS
 
@@ -41,7 +39,7 @@ class LocalTTS(BaseTTS):
         rvc_f0_up_key: int = 0,
         rvc_index_rate: float = 0.0,
         kokoro_voice: str = "af_heart",
-        audio_dir: str | Path = "",
+        audio_dir: Union[str, Path] = "",
     ) -> None:
         self.rvc_model_path = rvc_model_path
         self.rvc_exp_dir = rvc_exp_dir
@@ -179,6 +177,8 @@ class LocalTTS(BaseTTS):
 
     def _generate_sync(self, text: str, bot_id: str) -> Optional[str]:
         """Blocking Kokoro → (optional RVC) → WAV save."""
+        import numpy as np
+
         try:
             # --- Kokoro TTS ---
             audio_segments: list[np.ndarray] = []
@@ -219,8 +219,9 @@ class LocalTTS(BaseTTS):
     # RVC voice conversion
     # ------------------------------------------------------------------
 
-    def _apply_rvc(self, audio_np: np.ndarray) -> np.ndarray:
+    def _apply_rvc(self, audio_np) -> "np.ndarray":
         """Apply RVC voice conversion to a float32 numpy audio array."""
+        import numpy as np
         import torch  # type: ignore[import-untyped]
 
         # RVC expects int16 input
@@ -265,9 +266,11 @@ class LocalTTS(BaseTTS):
 
     @staticmethod
     def _save_wav(
-        audio_np: np.ndarray, filepath: Path, sample_rate: int = 22050
+        audio_np, filepath: Path, sample_rate: int = 22050
     ) -> None:
         """Write a float32 numpy array as a 16-bit PCM WAV file."""
+        import numpy as np
+
         # Clip and convert to int16
         audio_int16 = np.clip(audio_np * 32767, -32768, 32767).astype(np.int16)
         raw = audio_int16.tobytes()
