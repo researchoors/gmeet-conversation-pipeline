@@ -19,7 +19,7 @@ class BaseLLM(ABC):
         self,
         conversation: list,
         message: str,
-        bot_state: dict | None = None,
+        bot_state: Optional[dict] = None,
     ) -> Optional[str]:
         """Generate a response to *message* given *conversation* history.
 
@@ -29,13 +29,13 @@ class BaseLLM(ABC):
             Recent chat messages as dicts (``{"role": ..., "content": ...}``).
         message : str
             The latest user utterance to respond to.
-        bot_state : dict | None
+        bot_state : dict or None
             Mutable per-bot state bag (e.g. for tracking expanded memory
             entries across turns).  Implementations may read *and* write.
 
         Returns
         -------
-        str | None
+        str or None
             The assistant's reply, or ``None`` if the agent should stay
             silent.
         """
