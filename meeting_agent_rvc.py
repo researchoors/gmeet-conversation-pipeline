@@ -1,12 +1,11 @@
 """
 Hank Bob Meeting Agent — Recall.ai integration
-Kokoro+RVC local TTS pipeline + Voice Gateway (memory snapshots + RAG + routing)
+Kokoro+RVC local TTS pipeline (replaces ElevenLabs REST)
 
 Architecture:
-- Recall webhook → transcript → Voice Gateway (snapshot/RAG/routing) → LLM → Kokoro TTS → RVC → WAV → AudioBufferSourceNode
+- Recall webhook → transcript → LLM → Kokoro TTS → RVC voice conversion → WAV → AudioBufferSourceNode
 - Zero API calls for TTS — fully local on Apple Silicon
 - asyncio.Lock per bot prevents concurrent/duplicate responses
-- Referencable memory snapshots: LLM sees entry index, can EXPAND[n] for details
 """
 
 import os
@@ -16,7 +15,6 @@ import asyncio
 import logging
 import uuid
 import time
-import re
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,15 +32,10 @@ import soundfile as sf
 RECALL_API_KEY = os.environ.get("RECALL_API_KEY", "")
 RECALL_BASE = "https://us-west-2.recall.ai/api/v1"
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4.1-mini")  # Changed default
-
-# Voice Gateway models
-FAST_MODEL = os.environ.get("FAST_MODEL", "google/gemini-2.5-flash")
-STANDARD_MODEL = os.environ.get("STANDARD_MODEL", "openai/gpt-4.1-mini")
-DEEP_MODEL = os.environ.get("DEEP_MODEL", "anthropic/claude-sonnet-4")
+LLM_MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4")
 
 # RVC config
-RVC_MODEL_PATH = os.environ.get("RVC_MODEL_PATH",
+RVC_MODEL_PATH = os.environ.get("RVC_MODEL_PATH", 
     "/Users/inference2/.hermes/voice_references/rvc_dataset_48k/HankHill_e100.pth")
 RVC_EXP_DIR = "/Users/inference2/.hermes/voice_references/rvc_dataset_48k"
 RVC_REPO_DIR = "/Users/inference2/RVC"
@@ -53,14 +46,12 @@ RVC_INDEX_RATE = float(os.environ.get("RVC_INDEX_RATE", "0.0"))
 # Kokoro config
 KOKORO_VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 
-# Memory paths
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-MEMORY_FILE = HERMES_HOME / "memories" / "MEMORY.md"
-USER_FILE = HERMES_HOME / "memories" / "USER.md"
-
 PORT = 9120
 AUDIO_DIR = Path.home() / ".hermes" / "audio_cache" / "meeting_tts"
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+# VRM avatar directory
+AVATAR_DIR = Path.home() / ".hermes" / "avatars"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
 logger = logging.getLogger("meeting-agent")
@@ -69,6 +60,8 @@ app = FastAPI(title="Hank Bob Meeting Agent")
 
 # In-memory state
 active_bots: dict = {}
+
+# Audio queue: bot_id -> list of {id, text, filename}
 audio_queue: dict = {}
 
 # ============================================================
@@ -76,7 +69,7 @@ audio_queue: dict = {}
 # ============================================================
 def load_env():
     global RECALL_API_KEY, OPENROUTER_KEY
-    env_path = HERMES_HOME / ".env"
+    env_path = Path.home() / ".hermes" / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text().splitlines():
@@ -94,187 +87,29 @@ def load_env():
 
 load_env()
 
-# Also try auth.json credential pool for a working OpenRouter key
-def _get_openrouter_key():
-    auth_path = HERMES_HOME / "auth.json"
-    if auth_path.exists():
-        try:
-            d = json.loads(auth_path.read_text())
-            for k in d.get("credential_pool", {}).get("openrouter", []):
-                token = k.get("access_token", "")
-                if token and k.get("status") != "exhausted":
-                    return token
-        except Exception:
-            pass
-    return OPENROUTER_KEY
-
-OPENROUTER_KEY = _get_openrouter_key()
-
-
-# ============================================================
-# Voice Gateway: Memory Snapshot + RAG + Routing
-# ============================================================
-ENTRY_DELIMITER = "§"
-
-STOP_WORDS = {
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "can", "shall", "to", "of", "in", "for",
-    "on", "with", "at", "by", "from", "as", "into", "through", "during",
-    "before", "after", "above", "below", "between", "out", "off", "over",
-    "under", "again", "further", "then", "once", "and", "but", "or",
-    "nor", "not", "so", "yet", "both", "either", "neither", "each",
-    "every", "all", "any", "few", "more", "most", "other", "some",
-    "such", "no", "only", "own", "same", "than", "too", "very",
-    "just", "because", "if", "when", "where", "how", "what", "which",
-    "who", "whom", "this", "that", "these", "those", "i", "me", "my",
-    "we", "our", "you", "your", "he", "him", "his", "she", "her",
-    "it", "its", "they", "them", "their", "about", "up", "also",
-    "know", "tell", "get", "got", "like", "think", "want", "need",
-}
-
-TOOL_KEYWORDS = {"github", "repo", "issue", "pr ", "pull request", "commit", "deploy",
-                 "install", "server", "docker", "nomad", "latest issues"}
-
-MEMORY_KEYWORDS = {"remember", "recall", "know about", "what is", "who is",
-                   "tell me about", "explain", "describe", "about the",
-                   "darkbloom", "d-inference", "swiftlm", "dflash", "researchoors",
-                   "layr", "benchmark", "project", "setup", "configured",
-                   "hermes", "ethan", "hank"}
-
-SIMPLE_PATTERNS = [
-    re.compile(r'^(hi|hey|hello|yo|sup|what\'s up|thanks|ok|yes|no|sure|cool|nice|got it)', re.I),
-    re.compile(r'^\d+\s*[\+\-\*\/]\s*\d+'),
-]
-
-EXPAND_RE = re.compile(r'EXPAND\[(\d+(?:\s*,\s*\d+)*)\]')
-
-
-class MemorySnapshot:
-    """Parses MEMORY.md + USER.md into §-delimited entries with index + compressed summary."""
-
-    def __init__(self):
-        self.entries = []  # list of dicts: {index, source, text}
-        self.summary = ""  # ultra-compressed overview (~80 tokens)
-        self.index_text = ""  # one-line-per-entry index
-        self.built_at = 0.0
-
-    def refresh_if_stale(self, max_age=300):
-        mem_mtime = MEMORY_FILE.stat().st_mtime if MEMORY_FILE.exists() else 0
-        usr_mtime = USER_FILE.stat().st_mtime if USER_FILE.exists() else 0
-        if max(mem_mtime, usr_mtime) > self.built_at:
-            self.build()
-
-    def build(self):
-        entries = []
-        for source, path in [("memory", MEMORY_FILE), ("user", USER_FILE)]:
-            if not path.exists():
-                continue
-            content = path.read_text().strip()
-            if not content:
-                continue
-            for chunk in content.split(ENTRY_DELIMITER):
-                chunk = chunk.strip()
-                if chunk:
-                    entries.append({"index": len(entries), "source": source, "text": chunk})
-
-        self.entries = entries
-        self.built_at = time.time()
-
-        # Build index text
-        lines = []
-        for e in entries:
-            preview = e["text"][:80].replace("\n", " ").strip()
-            if len(e["text"]) > 80:
-                preview += "..."
-            lines.append(f"[{e['index']}] {preview}")
-        self.index_text = "\n".join(lines)
-
-        # Build compressed summary
-        parts = []
-        for e in entries[:5]:
-            first = e["text"].split(".")[0].strip()
-            if first:
-                parts.append(first)
-        self.summary = " | ".join(parts)
-
-        logger.info(f"Memory snapshot built: {len(entries)} entries")
-
-    def rag_retrieve(self, query, top_k=3):
-        query_terms = {w.lower() for w in re.findall(r'\w+', query) if w.lower() not in STOP_WORDS}
-        if not query_terms:
-            return []
-        scored = []
-        for e in self.entries:
-            entry_terms = {w.lower() for w in re.findall(r'\w+', e["text"]) if w.lower() not in STOP_WORDS}
-            overlap = len(query_terms & entry_terms)
-            if overlap > 0:
-                scored.append((overlap, e))
-        scored.sort(key=lambda x: -x[0])
-        return [e for _, e in scored[:top_k]]
-
-    @staticmethod
-    def classify_query(query):
-        q_lower = query.lower().strip()
-        for pat in SIMPLE_PATTERNS:
-            if pat.match(q_lower):
-                return "fast"
-        query_words = set(re.findall(r'\w+', q_lower))
-        if query_words & TOOL_KEYWORDS:
-            return "deep"
-        for kw in MEMORY_KEYWORDS:
-            if kw in q_lower:
-                return "standard"
-        if memory.rag_retrieve(query, top_k=1):
-            return "standard"
-        return "fast"
-
-    @staticmethod
-    def parse_expands(text):
-        indices = set()
-        for match in EXPAND_RE.finditer(text):
-            for num_str in match.group(1).split(","):
-                try:
-                    idx = int(num_str.strip())
-                    if 0 <= idx < len(memory.entries):
-                        indices.add(idx)
-                except ValueError:
-                    continue
-        return sorted(indices)
-
-    @staticmethod
-    def strip_expands(text):
-        return EXPAND_RE.sub("", text).strip()
-
-
-# Global snapshot
-memory = MemorySnapshot()
-memory.build()
-
-
 # ============================================================
 # Kokoro + RVC TTS Engine (lazy-loaded, runs in-process)
 # ============================================================
 class LocalTTSEngine:
     """Local TTS pipeline: Kokoro (text→speech) + RVC (voice conversion)."""
-
+    
     def __init__(self):
         self._kokoro = None
         self._vc = None
         self._config = None
         self._ready = False
-
+    
     def _ensure_init(self):
         if self._ready:
             return
-
+        
         logger.info("Initializing local TTS engine (Kokoro + RVC)...")
         t0 = time.time()
-
+        
         # Kokoro
         from kokoro import KPipeline
         self._kokoro = KPipeline(lang_code='a')
-
+        
         # RVC
         sys.path.insert(0, RVC_REPO_DIR)
         os.environ.update({
@@ -283,25 +118,25 @@ class LocalTTSEngine:
             "outside_index_root": f"{RVC_EXP_DIR}/Index",
             "rmvpe_root": f"{RVC_REPO_DIR}/assets/rmvpe",
         })
-
+        
         from infer.modules.vc.modules import VC
         from configs.config import Config
-
+        
         self._config = Config()
         self._vc = VC(self._config)
-
+        
         # Load RVC model
         model_name = Path(RVC_MODEL_PATH).name
         self._vc.get_vc(model_name, 0.5, 0.33)
-
+        
         self._ready = True
         elapsed = time.time() - t0
         logger.info(f"Local TTS engine ready in {elapsed:.1f}s")
-
+    
     def generate(self, text: str) -> tuple:
         """Generate audio from text. Returns (sample_rate, np_float32_array)."""
         self._ensure_init()
-
+        
         # Step 1: Kokoro TTS
         generator = self._kokoro(text, voice=KOKORO_VOICE)
         all_audio = []
@@ -310,11 +145,11 @@ class LocalTTSEngine:
         kokoro_audio = np.concatenate(all_audio)
         kokoro_sr = 24000
         logger.info(f"Kokoro: {len(kokoro_audio)/kokoro_sr:.1f}s audio from {len(text)} chars")
-
+        
         # Save temp WAV for RVC (it reads from file)
         tmp_wav = AUDIO_DIR / f"_kokoro_tmp_{uuid.uuid4().hex[:6]}.wav"
         sf.write(str(tmp_wav), kokoro_audio, kokoro_sr)
-
+        
         try:
             # Step 2: RVC voice conversion
             result = self._vc.vc_single(
@@ -331,14 +166,15 @@ class LocalTTSEngine:
                 rms_mix_rate=0.25,
                 protect=0.33,
             )
-
+            
             info = result[0]
             sr, audio_int16 = result[1]
             audio_float = audio_int16.flatten().astype(np.float32) / 32768.0
             logger.info(f"RVC: {info} → {len(audio_float)/sr:.1f}s at {sr}Hz")
-
+            
             return sr, audio_float
         finally:
+            # Cleanup temp file
             try:
                 tmp_wav.unlink()
             except:
@@ -349,9 +185,9 @@ tts_engine = LocalTTSEngine()
 
 
 # ============================================================
-# System prompt (enhanced with memory snapshot)
+# System prompt
 # ============================================================
-BASE_SYSTEM = """You are Hank Bob, an AI research assistant for the researchoors community. You're joining a Google Meet call as a participant.
+SYSTEM_PROMPT = """You are Hank Bob, an AI research assistant for the researchoors community. You're joining a Google Meet call as a participant.
 
 Guidelines:
 - Be concise and conversational — think voice message, not essay
@@ -368,73 +204,17 @@ Guidelines:
 - If you don't know something, say so briefly and move on"""
 
 
-def build_system_prompt(path, rag_entries=None, expanded_indices=None):
-    """Build system prompt with memory context based on routing path."""
-    parts = [BASE_SYSTEM]
-
-    # Always include snapshot summary
-    parts.append(f"\nUser context: {memory.summary}")
-
-    if path in ("standard", "deep"):
-        # Include entry index so LLM can EXPAND specific entries
-        parts.append(f"\nMemory entries available (use EXPAND[n] to request details):\n{memory.index_text}")
-
-    # Add RAG-enriched entries
-    if rag_entries:
-        parts.append("\nRelevant memory:")
-        for e in rag_entries:
-            parts.append(f"  {e['text']}")
-
-    # Add expanded entries from follow-up
-    if expanded_indices is not None:
-        expanded = [memory.entries[i] for i in expanded_indices if i < len(memory.entries)]
-        if expanded:
-            parts.append("\nExpanded entries:")
-            for e in expanded:
-                parts.append(f"  {e['text']}")
-
-    return "\n".join(parts)
-
-
 # ============================================================
-# LLM Call (with voice gateway routing)
+# LLM Call
 # ============================================================
-async def generate_response(conversation: list, new_message: str, bot_state: dict = None) -> Optional[str]:
-    """Call the LLM with memory-aware routing. Returns None if Hank shouldn't respond."""
-    # Refresh snapshot if stale
-    memory.refresh_if_stale()
-
-    # Classify query
-    path = MemorySnapshot.classify_query(new_message)
-
-    # Build RAG context
-    rag_entries = None
-    if path in ("standard", "deep"):
-        rag_entries = memory.rag_retrieve(new_message, top_k=3)
-
-    # Get expanded entries from bot state (multi-turn)
-    expanded = None
-    if bot_state and "expanded_entries" in bot_state:
-        expanded = sorted(bot_state["expanded_entries"])
-
-    # Build system prompt
-    system_prompt = build_system_prompt(path, rag_entries=rag_entries, expanded_indices=expanded)
-
-    # Select model
-    if path == "fast":
-        model = FAST_MODEL
-    elif path == "standard":
-        model = STANDARD_MODEL
-    else:
-        model = DEEP_MODEL
-
-    messages = [{"role": "system", "content": system_prompt}]
+async def generate_response(conversation: list, new_message: str) -> Optional[str]:
+    """Call the LLM to generate a response. Returns None if Hank shouldn't respond."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in conversation[-20:]:
         messages.append(msg)
     messages.append({"role": "user", "content": new_message})
 
     try:
-        t0 = asyncio.get_event_loop().time()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -444,7 +224,7 @@ async def generate_response(conversation: list, new_message: str, bot_state: dic
                     "HTTP-Referer": "https://meet.model-optimizors.com",
                 },
                 json={
-                    "model": model,
+                    "model": LLM_MODEL,
                     "messages": messages,
                     "max_tokens": 300,
                     "temperature": 0.7,
@@ -455,31 +235,8 @@ async def generate_response(conversation: list, new_message: str, bot_state: dic
                 return None
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
-
-            t1 = asyncio.get_event_loop().time()
-            usage = data.get("usage", {})
-            prompt_tok = usage.get("prompt_tokens", 0)
-            comp_tok = usage.get("completion_tokens", 0)
-
-            logger.info(
-                f"LLM path={path} model={model.split('/')[-1]} "
-                f"latency={((t1-t0)*1000):.0f}ms "
-                f"prompt={prompt_tok} comp={comp_tok} "
-                f"rag={len(rag_entries) if rag_entries else 0}"
-            )
-
             if content.upper() in ("...", "SILENT", "NO_RESPONSE", "PASS", "SKIP"):
                 return None
-
-            # Parse EXPAND directives
-            expand_indices = MemorySnapshot.parse_expands(content)
-            if expand_indices and bot_state is not None:
-                if "expanded_entries" not in bot_state:
-                    bot_state["expanded_entries"] = set()
-                bot_state["expanded_entries"].update(expand_indices)
-                logger.info(f"EXPAND requested: entries {expand_indices}")
-            content = MemorySnapshot.strip_expands(content)
-
             return content
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
@@ -495,13 +252,13 @@ async def generate_tts_audio(text: str, bot_id: str) -> Optional[str]:
         # Run in thread pool to not block the event loop
         loop = asyncio.get_event_loop()
         sr, audio_float = await loop.run_in_executor(None, tts_engine.generate, text)
-
+        
         # Save WAV
         audio_id = str(uuid.uuid4())[:8]
         filename = f"{bot_id[:8]}_{audio_id}.wav"
         filepath = AUDIO_DIR / filename
         sf.write(str(filepath), audio_float, sr)
-
+        
         duration = len(audio_float) / sr
         logger.info(f"TTS WAV ready: {duration:.1f}s, {filepath.stat().st_size} bytes")
 
@@ -521,99 +278,350 @@ async def generate_tts_audio(text: str, bot_id: str) -> Optional[str]:
         import traceback
         traceback.print_exc()
         return None
-
-
-# ============================================================
-# Agent Webpage
-# ============================================================
-
 AGENT_HTML = """<!DOCTYPE html>
 <html>
 <head>
 <title>Hank Bob</title>
 <style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    margin: 0;
-    background: #0a0a0a;
-    color: #F2F2F2;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
+    background: #0d0d0d;
     overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   }
-  .container {
-    text-align: center;
-    transition: all 0.3s;
+  #canvas {
+    width: 100vw;
+    height: 100vh;
+    display: block;
   }
-  .avatar {
-    width: 80px; height: 80px;
-    background: #1a1a2e;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    margin: 0 auto 12px;
-    font-size: 28px; font-weight: 700;
-    color: #95BFFF;
-    border: 3px solid #2a2a4e;
-  }
-  .speaking .avatar {
-    border-color: #95BFFF;
-    box-shadow: 0 0 30px rgba(149, 191, 255, 0.5);
-    animation: glow 1s infinite;
-  }
-  .name { font-size: 18px; font-weight: 600; color: #E0E0E0; }
-  .status { font-size: 13px; color: #888; margin-top: 6px; }
-  .response-text {
-    margin-top: 16px; font-size: 20px; color: #F2F2F2;
-    max-width: 500px; line-height: 1.4; min-height: 28px;
-  }
-  .tts-badge {
+  .badge {
     position: fixed; top: 12px; right: 12px;
     background: #1a3a1a; color: #4CAF50; padding: 4px 10px;
     border-radius: 8px; font-size: 11px; font-weight: 600;
+    color: #F2F2F2; z-index: 10;
   }
-  .memory-badge {
-    position: fixed; top: 12px; left: 12px;
-    background: #1a1a3a; color: #95BFFF; padding: 4px 10px;
-    border-radius: 8px; font-size: 11px; font-weight: 600;
+  .status-bar {
+    position: fixed; bottom: 40px; left: 0; right: 0;
+    text-align: center;
+    font-size: 14px;
+    color: #888;
+    height: 20px;
+    z-index: 10;
   }
-  @keyframes glow {
-    0%, 100% { box-shadow: 0 0 30px rgba(149, 191, 255, 0.3); }
-    50% { box-shadow: 0 0 50px rgba(149, 191, 255, 0.6); }
+  .response-text {
+    position: fixed; bottom: 10px; left: 0; right: 0;
+    text-align: center;
+    font-size: 18px;
+    color: #E0E0E0;
+    max-width: 500px;
+    margin: 0 auto;
+    line-height: 1.4;
+    min-height: 28px;
+    z-index: 10;
+  }
+  .loading {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #95BFFF; font-size: 18px; z-index: 20;
   }
 </style>
 </head>
 <body>
-<div class="tts-badge">🔊 Local Kokoro+RVC</div>
-<div class="memory-badge">🧠 Memory Snapshot</div>
-<div class="container" id="agent">
-  <div class="avatar">HB</div>
-  <div class="name">Hank Bob</div>
-  <div class="status" id="status">Connecting...</div>
-  <div class="response-text" id="responseText"></div>
-</div>
+<div class="badge">🔊 Kokoro+RVC · 🧠 Snapshot</div>
+<div class="loading" id="loading">Loading avatar...</div>
+<div class="status-bar" id="status">Listening...</div>
+<div class="response-text" id="responseText"></div>
+<canvas id="canvas"></canvas>
 
-<script>
-const agentEl = document.getElementById('agent');
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.1.0/lib/three-vrm.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from 'https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.1.0/lib/three-vrm.module.js';
+
 const statusEl = document.getElementById('status');
 const responseTextEl = document.getElementById('responseText');
+const loadingEl = document.getElementById('loading');
 
 let isSpeaking = false;
 let currentSource = null;
 let pollInterval = null;
 let lastAudioCount = 0;
-
 let audioCtx = null;
+let analyser = null;
+let animFrame = null;
+let vrm = null;
+let clock = new THREE.Clock();
 
+// ============================================================
+// Three.js Scene
+// ============================================================
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d0d);
+
+// Camera
+const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 1.3, 2.0);
+camera.lookAt(0, 1.0, 0);
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+keyLight.position.set(1, 2, 1);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0x95BFFF, 0.4);
+fillLight.position.set(-1, 1, 1);
+scene.add(fillLight);
+
+const rimLight = new THREE.DirectionalLight(0x95BFFF, 0.6);
+rimLight.position.set(0, 1.5, -1);
+scene.add(rimLight);
+
+// ============================================================
+// Load VRM
+// ============================================================
+const loader = new GLTFLoader();
+loader.register((parser) => new VRMLoaderPlugin(parser));
+
+loader.load(
+  '/avatar.vrm',
+  (gltf) => {
+    vrm = gltf.userData.vrm;
+    VRMUtils.removeUnnecessaryVertices(gltf.scene);
+    VRMUtils.removeUnnecessaryJoints(gltf.scene);
+    
+    // Rotate to face camera (VRM faces +Z by default)
+    vrm.scene.rotation.y = Math.PI;
+    scene.add(vrm.scene);
+
+    // Expose VRM to window for debugging
+    window.__vrm = vrm;
+    
+    // Build viseme map for lip sync
+    buildVisemeMap(vrm);
+    
+    loadingEl.style.display = 'none';
+    
+    // Log available expressions
+    if (vrm.expressionManager) {
+      const exprs = vrm.expressionManager.expressions;
+      const names = exprs ? Object.keys(exprs) : [];
+      console.log('[HankBob] Expression names:', names.join(', '));
+      
+      // Try to get actual expression names from the VRM data
+      const expressionMap = {};
+      names.forEach(name => {
+        try {
+          const expr = exprs[name];
+          if (expr && expr.name) expressionMap[name] = expr.name;
+        } catch(e) {}
+      });
+      console.log('[HankBob] Expression map:', JSON.stringify(expressionMap));
+      
+      // Check for visemes (VRM1 uses VRMC_vrm_expression with presetName)
+      const visemes = ['aa', 'ih', 'ou', 'ee', 'oh', 'happy', 'angry', 'sad', 'surprised', 'neutral'];
+      const found = [];
+      names.forEach(name => {
+        try {
+          const expr = exprs[name];
+          const preset = expr?.presetName || expr?.name || '';
+          if (visemes.includes(preset.toLowerCase())) found.push(preset);
+        } catch(e) {}
+      });
+      console.log('[HankBob] Visemes found:', found.join(', ') || 'NONE — will use amplitude fallback');
+    }
+  },
+  (progress) => {
+    console.log('[HankBob] Loading:', (progress.loaded / progress.total * 100).toFixed(0) + '%');
+  },
+  (error) => {
+    console.error('[HankBob] VRM load error:', error);
+    loadingEl.textContent = 'Avatar load failed — using fallback';
+    setTimeout(() => { loadingEl.style.display = 'none'; }, 3000);
+  }
+);
+
+// ============================================================
+// Viseme mapping
+// ============================================================
+// This VRM has expressions indexed 0-17 with names VRMExpression_aa, VRMExpression_ee, etc.
+// We need to find the viseme indices at runtime
+let VISEME_MAP = {}; // will be populated after VRM load
+let currentVisemeWeights = {};
+
+function buildVisemeMap(vrm) {
+  const exprs = vrm.expressionManager.expressions;
+  const visemeNames = ['aa', 'ih', 'ou', 'ee', 'oh'];
+  const nameToIdx = {};
+  Object.keys(exprs).forEach(idx => {
+    try {
+      const name = exprs[idx].name || '';
+      // Extract the expression type from "VRMExpression_aa"
+      const match = name.match(/VRMExpression_(\w+)/);
+      if (match) nameToIdx[match[1]] = parseInt(idx);
+    } catch(e) {}
+  });
+  visemeNames.forEach(v => {
+    if (nameToIdx[v] !== undefined) {
+      VISEME_MAP[v] = nameToIdx[v];
+    }
+  });
+  console.log('[HankBob] Viseme map:', JSON.stringify(VISEME_MAP));
+}
+
+// Frequency band mapping to visemes
+// Low freq → "oh" (round mouth), mid → "aa" (open), high → "ee" (wide)
+function audioToVisemeWeights(dataArray) {
+  const len = dataArray.length;
+  
+  // Split into frequency bands
+  let low = 0, mid = 0, high = 0;
+  const lowEnd = Math.floor(len * 0.15);
+  const midEnd = Math.floor(len * 0.4);
+  
+  for (let i = 1; i < lowEnd; i++) low += dataArray[i];
+  for (let i = lowEnd; i < midEnd; i++) mid += dataArray[i];
+  for (let i = midEnd; i < Math.min(len, midEnd + 20); i++) high += dataArray[i];
+  
+  low /= (lowEnd - 1);
+  mid /= (midEnd - lowEnd);
+  high /= 20;
+  
+  // Overall amplitude
+  const amplitude = (low + mid + high) / 3;
+  const norm = Math.min(1, amplitude / 100);
+  
+  if (norm < 0.08) {
+    // Silent — close mouth
+    return { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+  }
+  
+  // Blend based on frequency distribution
+  const total = low + mid + high + 1;
+  const lowR = low / total;
+  const midR = mid / total;
+  const highR = high / total;
+  
+  return {
+    aa: norm * midR * 2.5,      // open mouth — mid frequencies
+    ih: norm * 0.3,             // slight — always a bit
+    ou: norm * lowR * 2.5,      // round mouth — low frequencies
+    ee: norm * highR * 2.5,     // wide mouth — high frequencies
+    oh: norm * lowR * 1.5,      // round — low freq
+  };
+}
+
+// Set expression by viseme name using index
+function setExpression(visemeName, weight) {
+  const idx = VISEME_MAP[visemeName];
+  if (idx === undefined) return;
+  try {
+    vrm.expressionManager.setValue(idx, Math.min(1, Math.max(0, weight)));
+  } catch(e) {}
+}
+
+// ============================================================
+// Animation loop
+// ============================================================
+function animate() {
+  requestAnimationFrame(animate);
+  
+  const delta = clock.getDelta();
+  
+  if (vrm) {
+    // Update VRM
+    vrm.update(delta);
+    
+    // Lip sync: apply viseme weights from audio analyser
+    if (isSpeaking && analyser) {
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyser.getByteFrequencyData(dataArray);
+      
+      const weights = audioToVisemeWeights(dataArray);
+      
+      // Smooth transition
+      const smooth = 0.3;
+      Object.keys(weights).forEach(v => {
+        if (!currentVisemeWeights[v]) currentVisemeWeights[v] = 0;
+        currentVisemeWeights[v] = currentVisemeWeights[v] * (1 - smooth) + (weights[v] || 0) * smooth;
+        setExpression(v, currentVisemeWeights[v]);
+      });
+    } else {
+      // Close mouth when not speaking
+      const decay = 0.15;
+      Object.keys(VISEME_MAP).forEach(v => {
+        if (!currentVisemeWeights[v]) currentVisemeWeights[v] = 0;
+        currentVisemeWeights[v] *= (1 - decay);
+        setExpression(v, currentVisemeWeights[v]);
+      });
+    }
+    
+    // Idle animation: subtle breathing + slight sway
+    const t = clock.elapsedTime;
+    if (vrm.humanoid) {
+      try {
+        const chest = vrm.humanoid.getNormalizedBoneNode('chest');
+        if (chest) {
+          chest.rotation.x = Math.sin(t * 1.2) * 0.015;
+        }
+        const head = vrm.humanoid.getNormalizedBoneNode('head');
+        if (head) {
+          head.rotation.y = Math.sin(t * 0.5) * 0.03;
+          head.rotation.x = Math.sin(t * 0.7) * 0.01;
+        }
+        const spine = vrm.humanoid.getNormalizedBoneNode('spine');
+        if (spine) {
+          spine.rotation.x = Math.sin(t * 1.2) * 0.01;
+        }
+      } catch(e) {}
+    }
+  }
+  
+  renderer.render(scene, camera);
+}
+animate();
+
+// Resize
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// Audio + Polling (same as before but with lip sync)
+// ============================================================
 async function initAudio() {
   if (audioCtx) {
-    if (audioCtx.state === 'suspended') {
-      await audioCtx.resume();
-    }
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
     return;
   }
   audioCtx = new AudioContext();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  analyser.smoothingTimeConstant = 0.7;
+  analyser.connect(audioCtx.destination);
+
   if (audioCtx.state === 'suspended') {
     const tryResume = async () => {
       try { await audioCtx.resume(); } catch(e) {}
@@ -621,7 +629,6 @@ async function initAudio() {
     };
     tryResume();
   }
-  debug('AudioContext ready, state=' + audioCtx.state + ' sampleRate=' + audioCtx.sampleRate);
 }
 
 function debug(msg) {
@@ -651,53 +658,35 @@ async function playAudio(filename, text) {
   if (isSpeaking) return;
   isSpeaking = true;
   statusEl.textContent = 'Speaking...';
-  agentEl.className = 'container speaking';
   responseTextEl.textContent = text || '';
 
   try {
     await initAudio();
     if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-    const t_fetch_start = performance.now();
     const audioResp = await fetch('/audio/' + filename);
     const arrayBuffer = await audioResp.arrayBuffer();
-    const t_fetch_end = performance.now();
-
-    const t_decode_start = performance.now();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    const t_decode_end = performance.now();
 
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
+    source.connect(analyser);
     currentSource = source;
 
     source.onended = () => {
       isSpeaking = false;
       currentSource = null;
       statusEl.textContent = 'Listening...';
-      agentEl.className = 'container';
       setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
     };
 
-    const t_play_start = performance.now();
     source.start(0);
-
-    const fetch_ms = (t_fetch_end - t_fetch_start).toFixed(0);
-    const decode_ms = (t_decode_end - t_decode_start).toFixed(0);
-    const play_overhead_ms = (t_play_start - t_decode_end).toFixed(0);
-    const client_total_ms = (t_play_start - t_fetch_start).toFixed(0);
-    debug(
-      `CLIENT_BENCH | fetch=${fetch_ms}ms decode=${decode_ms}ms play_overhead=${play_overhead_ms}ms ` +
-      `client_total=${client_total_ms}ms | ${audioBuffer.duration.toFixed(1)}s ${audioBuffer.sampleRate}Hz`
-    );
 
   } catch (e) {
     debug('audio_error: ' + String(e));
     isSpeaking = false;
     currentSource = null;
     statusEl.textContent = 'Listening...';
-    agentEl.className = 'container';
   }
 }
 
@@ -725,8 +714,6 @@ async def health():
         "audio_queue_size": sum(len(v) for v in audio_queue.values()),
         "tts_engine": "local_kokoro_rvc",
         "rvc_model": Path(RVC_MODEL_PATH).name,
-        "memory_entries": len(memory.entries),
-        "memory_snapshot_age": round(time.time() - memory.built_at, 1),
     }
 
 @app.post("/api/debug")
@@ -746,6 +733,22 @@ async def serve_audio(filename: str):
         str(filepath),
         media_type=media_type,
         headers={"Cache-Control": "no-cache"},
+    )
+
+# VRM avatar endpoint
+@app.get("/avatar.vrm")
+async def serve_avatar():
+    """Serve the VRM avatar file for the 3D character."""
+    vrm_path = AVATAR_DIR / "avatar.vrm"
+    if not vrm_path.exists():
+        # Try constraint.vrm as fallback
+        vrm_path = AVATAR_DIR / "constraint.vrm"
+    if not vrm_path.exists():
+        raise HTTPException(404, "Avatar file not found")
+    return FileResponse(
+        str(vrm_path),
+        media_type="model/vrm",
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 @app.get("/api/audio-queue")
@@ -819,12 +822,12 @@ async def join_meeting(request: Request):
             "speaking": False,
             "respond_lock": asyncio.Lock(),
             "last_processed_ts": "",
-            "expanded_entries": set(),  # Voice gateway: track EXPAND state per bot
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
         logger.info(f"Bot {bot_id} created, joining {meeting_url}")
         return {"bot_id": bot_id, "status": "joining", "data": data}
+
 
 @app.post("/api/bot/{bot_id}/leave")
 async def leave_meeting(bot_id: str):
@@ -928,10 +931,10 @@ async def process_and_respond(bot_id: str, speaker: str, text: str, ts: str = ""
         if bot_id not in active_bots:
             return
 
-        # LLM (now with voice gateway routing)
+        # LLM
         context_msg = f"{speaker} said: {text}"
         t3_llm_start = asyncio.get_event_loop().time()
-        response_text = await generate_response(bot_state["conversation"], context_msg, bot_state=bot_state)
+        response_text = await generate_response(bot_state["conversation"], context_msg)
         t4_llm_end = asyncio.get_event_loop().time()
         llm_ms = (t4_llm_end - t3_llm_start) * 1000
 
@@ -968,6 +971,7 @@ async def process_and_respond(bot_id: str, speaker: str, text: str, ts: str = ""
         finally:
             bot_state["speaking"] = False
 
+
 @app.post("/api/bench/setup")
 async def bench_setup():
     bot_id = f"bench-{uuid.uuid4().hex[:8]}"
@@ -979,14 +983,15 @@ async def bench_setup():
         "speaking": False,
         "respond_lock": asyncio.Lock(),
         "last_processed_ts": "",
-        "expanded_entries": set(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return {"bot_id": bot_id, "status": "ready for bench"}
 
+
 @app.get("/api/bots")
 async def list_bots():
     return {"bots": {k: {kk: vv for kk, vv in v.items() if kk != "conversation"} for k, v in active_bots.items()}}
+
 
 @app.post("/api/bench/tts")
 async def benchmark_tts_only(request: Request):
@@ -999,21 +1004,21 @@ async def benchmark_tts_only(request: Request):
         raise HTTPException(400, f"bot_id required and must be active. Active: {list(active_bots.keys())}")
 
     timings = {}
-
+    
     t0 = asyncio.get_event_loop().time()
-
+    
     # TTS only
     t1 = asyncio.get_event_loop().time()
     filename = await generate_tts_audio(text, bot_id)
     t2 = asyncio.get_event_loop().time()
-
+    
     timings["tts_ms"] = round((t2 - t1) * 1000)
     timings["total_ms"] = round((t2 - t0) * 1000)
     timings["input_text"] = text
     timings["input_chars"] = len(text)
     timings["audio_file"] = filename
     timings["tts_engine"] = "local_kokoro_rvc"
-
+    
     if filename:
         fp = AUDIO_DIR / filename
         if fp.exists():
@@ -1024,9 +1029,10 @@ async def benchmark_tts_only(request: Request):
 
     return {"timings": timings}
 
+
 @app.post("/api/bench")
 async def benchmark_pipeline(request: Request):
-    """Run a synthetic benchmark: fake transcript → LLM (voice gateway) → Kokoro+RVC TTS → audio ready."""
+    """Run a synthetic benchmark: fake transcript → LLM → Kokoro+RVC TTS → audio ready."""
     body = await request.json()
     text = body.get("text", "Hey Hank, what do you think about MLX?")
     bot_id = body.get("bot_id")
@@ -1047,20 +1053,18 @@ async def benchmark_pipeline(request: Request):
     async with lock:
         t0 = asyncio.get_event_loop().time()
 
-        # LLM (voice gateway routed)
+        # LLM
         t2 = asyncio.get_event_loop().time()
+        # Seed conversation so Hank knows he's in a call and should respond
         if not bot_state["conversation"]:
             bot_state["conversation"] = [
                 {"role": "user", "content": "Ethan: Hey everyone, Hank Bob is here with us today."},
                 {"role": "assistant", "content": "Hey! Good to be here. What are we working on?"},
             ]
         context_msg = f"Ethan said: {text}"
-        response_text = await generate_response(bot_state["conversation"], context_msg, bot_state=bot_state)
+        response_text = await generate_response(bot_state["conversation"], context_msg)
         t3 = asyncio.get_event_loop().time()
         timings["llm_ms"] = round((t3 - t2) * 1000)
-
-        path = MemorySnapshot.classify_query(text)
-        timings["llm_path"] = path
 
         if not response_text:
             return {"error": "LLM chose to stay silent", "timings": timings}
@@ -1075,7 +1079,7 @@ async def benchmark_pipeline(request: Request):
         timings["response_text"] = response_text
         timings["audio_file"] = filename
         timings["tts_engine"] = "local_kokoro_rvc"
-
+        
         # Get actual audio duration
         if filename:
             fp = AUDIO_DIR / filename
@@ -1084,20 +1088,6 @@ async def benchmark_pipeline(request: Request):
                 timings["audio_duration_s"] = round(len(data) / sr, 2)
 
     return {"timings": timings}
-
-# Memory snapshot debug endpoint
-@app.get("/api/memory")
-async def get_memory_snapshot():
-    memory.refresh_if_stale()
-    return {
-        "summary": memory.summary,
-        "entry_count": len(memory.entries),
-        "index": memory.index_text,
-        "entries": [
-            {"index": e["index"], "source": e["source"], "text": e["text"][:200]}
-            for e in memory.entries
-        ],
-    }
 
 
 if __name__ == "__main__":
@@ -1110,9 +1100,8 @@ if __name__ == "__main__":
 
     print(f"Starting Hank Bob Meeting Agent on port {PORT}")
     print(f"Public URL: https://meet.model-optimizors.com")
-    print(f"LLM routing: fast={FAST_MODEL} standard={STANDARD_MODEL} deep={DEEP_MODEL}")
+    print(f"LLM: {LLM_MODEL}")
     print(f"TTS: Local Kokoro+RVC (Hank Hill)")
-    print(f"Memory: {len(memory.entries)} entries loaded")
     print(f"RVC model: {RVC_MODEL_PATH}")
     print(f"Audio: WAV → decodeAudioData → AudioBufferSourceNode")
 
