@@ -1,40 +1,53 @@
 # gmeet-conversation-pipeline
 
-Google Meet conversation pipeline powered by [Recall.ai](https://recall.ai). Joins Meet calls, captures real-time transcripts, generates AI summaries, and produces spoken recaps via ElevenLabs TTS.
+Google Meet conversation pipeline powered by [Recall.ai](https://recall.ai). Joins Meet calls, captures real-time transcripts, generates AI summaries, and produces spoken recaps via TTS.
 
 ## Architecture
 
 ```
-Google Meet → Recall.ai bot → Transcript webhook → LLM summary → ElevenLabs TTS → Audio playback
+Google Meet → Recall.ai bot → Transcript webhook → LLM → TTS → Audio playback
 ```
 
-## Features
+### Modular design
 
-- **Auto-join**: Connects to Google Meet via Recall.ai with configurable bot settings
-- **Real-time transcription**: Receives transcript webhooks from Recall.ai as the call progresses
-- **AI summarization**: Uses OpenRouter (Claude Sonnet) to generate structured meeting summaries
-- **Spoken recaps**: Converts summaries to natural speech via ElevenLabs TTS
-- **Audio serving**: Serves generated audio for playback through a web interface
+The pipeline is organized as a Python package with pluggable backends:
 
-## Setup
+| Layer | Abstraction | Implementations |
+|-------|-------------|-----------------|
+| Transport | `BaseTransport` | `RecallTransport` (webhook + WebSocket) |
+| LLM | `BaseLLM` | `OpenRouterLLM` (simple / voice-gateway routing) |
+| TTS | `BaseTTS` | `ElevenLabsTTS` (PCM streaming), `LocalTTS` (Kokoro + RVC on Apple Silicon) |
+
+All configuration is environment-driven via `gmeet_pipeline.config.GmeetSettings` (pydantic-settings).
+
+## Quick start
 
 1. Copy `.env.example` to `.env` and fill in your credentials
 2. Install dependencies: `pip install -r requirements.txt`
-3. Run: `python meeting_agent.py`
+3. Run: `python -m gmeet_pipeline.main`
+
+### With Docker
+
+```bash
+docker build -t gmeet-pipeline .
+docker run --env-file .env -p 9120:9120 gmeet-pipeline
+```
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `RECALL_API_KEY` | Recall.ai API key |
-| `ELEVENLABS_API_KEY` | ElevenLabs API key |
-| `ELEVENLABS_VOICE_ID` | ElevenLabs voice ID for TTS |
 | `OPENROUTER_API_KEY` | OpenRouter API key for LLM |
 | `SERVICE_URL` | Your service's public URL (for webhooks) |
+| `TTS_BACKEND` | `elevenlabs` or `local` (default: `elevenlabs`) |
+| `ELEVENLABS_API_KEY` | ElevenLabs API key (required if `TTS_BACKEND=elevenlabs`) |
+| `ELEVENLABS_VOICE_ID` | ElevenLabs voice ID |
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.11+
 - Recall.ai account
-- ElevenLabs account
 - OpenRouter account
+- ElevenLabs account (if using ElevenLabs TTS)
+- Kokoro + RVC (if using local TTS on Apple Silicon)

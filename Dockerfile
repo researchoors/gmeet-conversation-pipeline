@@ -5,8 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY meeting_agent.py .
+COPY gmeet_pipeline/ ./gmeet_pipeline/
 
 EXPOSE 9120
 
-CMD ["python", "meeting_agent.py"]
+CMD ["python", "-m", "gmeet_pipeline.main"]
