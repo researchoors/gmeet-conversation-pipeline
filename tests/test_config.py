@@ -14,6 +14,13 @@ from gmeet_pipeline.config import GmeetSettings, _try_dotenv, _openrouter_key_fr
 class TestGmeetSettingsDefaults:
     """Test that all GmeetSettings fields have expected defaults."""
 
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        """Clear all GMEET_ env vars so defaults are tested in isolation."""
+        for key in list(os.environ):
+            if key.startswith("GMEET_"):
+                monkeypatch.delenv(key, raising=False)
+
     def test_recall_defaults(self):
         s = GmeetSettings()
         assert s.recall_api_key == ""
@@ -131,15 +138,15 @@ class TestLoad:
         auth_path.write_text(json.dumps({
             "credential_pool": {
                 "openrouter": [
-                    {"access_token": "key-from-auth", "status": "active"}
+                    {"access_token": "test-active-key", "status": "active"}
                 ]
             }
         }))
         monkeypatch.setenv("GMEET_HERMES_HOME", str(tmp_path))
-        # Ensure no env key is set
         monkeypatch.delenv("GMEET_OPENROUTER_KEY", raising=False)
-        settings = GmeetSettings.load()
-        assert settings.openrouter_key == "key-from-auth"
+        with patch("gmeet_pipeline.config._try_dotenv"):
+            settings = GmeetSettings.load()
+        assert settings.openrouter_key == "test-active-key"
 
     def test_load_skips_exhausted_auth_json(self, tmp_path, monkeypatch):
         """load() should skip exhausted keys in auth.json."""
@@ -148,14 +155,15 @@ class TestLoad:
             "credential_pool": {
                 "openrouter": [
                     {"access_token": "exhausted-key", "status": "exhausted"},
-                    {"access_token": "valid-key", "status": "active"},
+                    {"access_token": "active-key-2", "status": "active"},
                 ]
             }
         }))
         monkeypatch.setenv("GMEET_HERMES_HOME", str(tmp_path))
         monkeypatch.delenv("GMEET_OPENROUTER_KEY", raising=False)
-        settings = GmeetSettings.load()
-        assert settings.openrouter_key == "valid-key"
+        with patch("gmeet_pipeline.config._try_dotenv"):
+            settings = GmeetSettings.load()
+        assert settings.openrouter_key == "active-key-2"
 
     def test_load_env_key_takes_priority(self, tmp_path, monkeypatch):
         """Environment variable should take priority over auth.json."""
