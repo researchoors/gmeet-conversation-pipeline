@@ -95,13 +95,14 @@ class TestHandleTranscript:
                 "started_at": "2025-01-01T00:00:00Z",
             }
         }
-        with patch.object(handler, "_process_and_respond", new_callable=AsyncMock):
+        with patch.object(handler, "_ensure_worker"):
             await handler._handle_transcript("bot-001", data)
 
         session = registry.get("bot-001")
         assert len(session.transcript) == 1
         assert session.transcript[0]["speaker"] == "Alice"
         assert session.transcript[0]["text"] == "Hello there"
+        assert session.response_queue.qsize() == 1
 
     async def test_transcript_skips_hank_bob_as_speaker(self, handler, registry):
         data = {
@@ -111,11 +112,12 @@ class TestHandleTranscript:
                 "started_at": "2025-01-01T00:00:00Z",
             }
         }
-        with patch.object(handler, "_process_and_respond", new_callable=AsyncMock):
+        with patch.object(handler, "_ensure_worker"):
             await handler._handle_transcript("bot-001", data)
 
         session = registry.get("bot-001")
         assert len(session.transcript) == 0  # skipped
+        assert session.response_queue.qsize() == 0
 
     async def test_transcript_skips_hank_in_name(self, handler, registry):
         data = {
@@ -125,7 +127,7 @@ class TestHandleTranscript:
                 "started_at": "2025-01-01T00:00:00Z",
             }
         }
-        with patch.object(handler, "_process_and_respond", new_callable=AsyncMock):
+        with patch.object(handler, "_ensure_worker"):
             await handler._handle_transcript("bot-001", data)
 
         session = registry.get("bot-001")
@@ -140,8 +142,7 @@ class TestHandleTranscript:
             }
         }
         # Should not raise, should return early
-        with patch.object(handler, "_process_and_respond", new_callable=AsyncMock):
-            await handler._handle_transcript("unknown-bot", data)
+        await handler._handle_transcript("unknown-bot", data)
 
     async def test_transcript_skips_empty_text(self, handler, registry):
         data = {
@@ -151,7 +152,7 @@ class TestHandleTranscript:
                 "started_at": "2025-01-01T00:00:00Z",
             }
         }
-        with patch.object(handler, "_process_and_respond", new_callable=AsyncMock):
+        with patch.object(handler, "_ensure_worker"):
             await handler._handle_transcript("bot-001", data)
 
         session = registry.get("bot-001")

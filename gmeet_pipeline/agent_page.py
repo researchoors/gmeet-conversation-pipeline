@@ -327,12 +327,24 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
     margin: 0;
     background: #0a0a0a;
     color: #F2F2F2;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', monospace;
     display: flex;
     align-items: center;
     justify-content: center;
     height: 100vh;
     overflow: hidden;
+  }
+  .main {
+    display: flex;
+    width: 100%;
+    height: 100vh;
+  }
+  .center {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
   }
   .container {
     text-align: center;
@@ -347,6 +359,7 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
     font-size: 28px; font-weight: 700;
     color: #95BFFF;
     border: 3px solid #2a2a4e;
+    transition: all 0.3s;
   }
   .speaking .avatar {
     border-color: #95BFFF;
@@ -355,53 +368,160 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
   }
   .name { font-size: 18px; font-weight: 600; color: #E0E0E0; }
   .status { font-size: 13px; color: #888; margin-top: 6px; }
+  .status-listening { color: #4ADE80; }
+  .status-llm { color: #FBBF24; }
+  .status-tts { color: #F97316; }
+  .status-speaking { color: #4ADE80; animation: pulse 1s infinite; }
+  .status-queuing { color: #EF4444; }
   .response-text {
-    margin-top: 16px; font-size: 20px; color: #F2F2F2;
+    margin-top: 16px; font-size: 18px; color: #F2F2F2;
     max-width: 500px; line-height: 1.4; min-height: 28px;
+    text-align: center;
   }
-  .tts-badge {
-    position: fixed; top: 12px; right: 12px;
-    background: #1a3a1a; color: #4CAF50; padding: 4px 10px;
-    border-radius: 8px; font-size: 11px; font-weight: 600;
+  /* Debug overlay — right panel */
+  .debug-panel {
+    width: 260px;
+    background: #0d0d0d;
+    border-left: 1px solid #1a1a2e;
+    padding: 12px;
+    font-size: 11px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
-  .memory-badge {
-    position: fixed; top: 12px; left: 12px;
-    background: #1a1a3a; color: #95BFFF; padding: 4px 10px;
-    border-radius: 8px; font-size: 11px; font-weight: 600;
+  .debug-section {
+    border-bottom: 1px solid #1a1a1a;
+    padding-bottom: 8px;
   }
+  .debug-section:last-child { border-bottom: none; }
+  .debug-label {
+    color: #555;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 3px;
+  }
+  .debug-value { color: #ccc; font-size: 12px; }
+  .debug-value.highlight { color: #95BFFF; }
+  .debug-value.warn { color: #FBBF24; }
+  .debug-value.error { color: #EF4444; }
+  .debug-value.good { color: #4ADE80; }
+  .participant-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .participant-chip {
+    background: #1a1a2e;
+    color: #95BFFF;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+  }
+  .pipeline-bar {
+    display: flex;
+    gap: 2px;
+    margin-top: 4px;
+  }
+  .pipeline-step {
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    background: #1a1a1a;
+    color: #555;
+  }
+  .pipeline-step.active {
+    background: #1a1a3a;
+    color: #95BFFF;
+  }
+  .pipeline-step.active-step {
+    background: #1a3a1a;
+    color: #4ADE80;
+    font-weight: 600;
+  }
+  .badge {
+    position: fixed;
+    top: 8px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .tts-badge { left: 8px; background: #1a3a1a; color: #4CAF50; }
+  .memory-badge { left: 110px; background: #1a1a3a; color: #95BFFF; }
+  .llm-badge { left: 230px; background: #1a1a3a; color: #FBBF24; }
   @keyframes glow {
     0%, 100% { box-shadow: 0 0 30px rgba(149, 191, 255, 0.3); }
     50% { box-shadow: 0 0 50px rgba(149, 191, 255, 0.6); }
   }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
 </style>
 </head>
 <body>
-<div class="tts-badge">🔊 Local Kokoro+RVC</div>
-<div class="memory-badge">🧠 Memory Snapshot</div>
-<div class="container" id="agent">
-  <div class="avatar">HB</div>
-  <div class="name">Hank Bob</div>
-  <div class="status" id="status">Connecting...</div>
-  <div class="response-text" id="responseText"></div>
+<div class="badge tts-badge">🔊 Kokoro</div>
+<div class="badge memory-badge">🧠 Flash</div>
+<div class="badge llm-badge" id="llmBadge">⚡ Gemini Flash</div>
+<div class="main">
+  <div class="center">
+    <div class="container" id="agent">
+      <div class="avatar">HB</div>
+      <div class="name">Hank Bob</div>
+      <div class="status" id="status">Connecting...</div>
+      <div class="response-text" id="responseText"></div>
+    </div>
+  </div>
+  <div class="debug-panel" id="debugPanel">
+    <div class="debug-section">
+      <div class="debug-label">Pipeline</div>
+      <div class="pipeline-bar" id="pipelineBar">
+        <span class="pipeline-step" id="step-idle">idle</span>
+        <span class="pipeline-step" id="step-llm">LLM</span>
+        <span class="pipeline-step" id="step-tts">TTS</span>
+        <span class="pipeline-step" id="step-speaking">speak</span>
+      </div>
+    </div>
+    <div class="debug-section">
+      <div class="debug-label">Queue</div>
+      <div class="debug-value" id="queueDepth">0 pending</div>
+    </div>
+    <div class="debug-section">
+      <div class="debug-label">Last Latency</div>
+      <div class="debug-value" id="latencyInfo">—</div>
+    </div>
+    <div class="debug-section">
+      <div class="debug-label">Participants</div>
+      <div class="participant-list" id="participantList">
+        <span style="color:#555">none yet</span>
+      </div>
+    </div>
+    <div class="debug-section">
+      <div class="debug-label">Last Transcript</div>
+      <div class="debug-value" id="lastTranscript" style="font-size:10px;max-height:60px;overflow:hidden">—</div>
+    </div>
+  </div>
 </div>
 
 <script>
 const agentEl = document.getElementById('agent');
 const statusEl = document.getElementById('status');
 const responseTextEl = document.getElementById('responseText');
+const queueDepthEl = document.getElementById('queueDepth');
+const latencyInfoEl = document.getElementById('latencyInfo');
+const participantListEl = document.getElementById('participantList');
+const lastTranscriptEl = document.getElementById('lastTranscript');
 
 let isSpeaking = false;
 let currentSource = null;
-let pollInterval = null;
 let lastAudioCount = 0;
-
 let audioCtx = null;
 
 async function initAudio() {
   if (audioCtx) {
-    if (audioCtx.state === 'suspended') {
-      await audioCtx.resume();
-    }
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
     return;
   }
   audioCtx = new AudioContext();
@@ -412,12 +532,40 @@ async function initAudio() {
     };
     tryResume();
   }
-  debug('AudioContext ready, state=' + audioCtx.state + ' sampleRate=' + audioCtx.sampleRate);
 }
 
 function debug(msg) {
   console.log('[HankBob]', msg);
-  fetch('/api/debug', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({msg})});
+  fetch('/api/debug', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg})}).catch(()=>{});
+}
+
+function updatePipelineUI(state) {
+  const labels = {
+    idle: 'Listening...',
+    queuing: 'Queued...',
+    llm: 'Thinking...',
+    tts: 'Generating speech...',
+    speaking: 'Speaking...',
+  };
+  statusEl.textContent = labels[state] || state;
+  statusEl.className = 'status status-' + state;
+  agentEl.className = (state === 'speaking' || state === 'llm' || state === 'tts') ? 'container speaking' : 'container';
+
+  const allSteps = ['idle', 'llm', 'tts', 'speaking'];
+  const activeIdx = allSteps.indexOf(state);
+  allSteps.forEach((step, i) => {
+    const el = document.getElementById('step-' + step);
+    if (!el) return;
+    el.className = 'pipeline-step';
+    if (i < activeIdx) el.classList.add('active');
+    if (i === activeIdx) el.classList.add('active-step');
+  });
+}
+
+function formatLatency(ms) {
+  if (!ms || ms === 0) return '—';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
 }
 
 async function pollAudio() {
@@ -428,38 +576,60 @@ async function pollAudio() {
     const items = data.items || [];
     if (items.length > lastAudioCount) {
       const latest = items[items.length - 1];
-      if (latest && latest.filename) {
-        await playAudio(latest.filename, latest.text);
-      }
+      if (latest && latest.filename) await playAudio(latest.filename, latest.text);
       lastAudioCount = items.length;
     }
-  } catch (e) {
-    console.error('Poll error:', e);
-  }
+  } catch (e) {}
+}
+
+async function pollSessionState() {
+  try {
+    const resp = await fetch('/api/session-state');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const bot = (data.bots || [])[0];
+    if (!bot) return;
+
+    updatePipelineUI(bot.pipeline_state || 'idle');
+
+    const qd = bot.queue_depth || 0;
+    queueDepthEl.textContent = qd + ' pending';
+    queueDepthEl.className = 'debug-value' + (qd > 2 ? ' error' : qd > 0 ? ' warn' : '');
+
+    if (bot.last_total_ms > 0) {
+      latencyInfoEl.innerHTML =
+        '<span class="debug-value highlight">Total ' + formatLatency(bot.last_total_ms) + '</span>' +
+        '<br>LLM ' + formatLatency(bot.last_llm_ms) + ' · TTS ' + formatLatency(bot.last_tts_ms);
+    }
+
+    const parts = bot.participants || [];
+    if (parts.length > 0) {
+      participantListEl.innerHTML = parts.map(p =>
+        '<span class="participant-chip">' + p + '</span>'
+      ).join('');
+    }
+
+    const last = bot.last_transcript;
+    if (last) {
+      lastTranscriptEl.textContent = (last.speaker || '?') + ': ' + (last.text || '').slice(0, 80);
+    }
+  } catch (e) {}
 }
 
 async function playAudio(filename, text) {
   if (isSpeaking) return;
   isSpeaking = true;
-  statusEl.textContent = 'Speaking...';
-  agentEl.className = 'container speaking';
+  updatePipelineUI('speaking');
   responseTextEl.textContent = text || '';
 
   try {
     await initAudio();
     if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-    const t_fetch_start = performance.now();
     const audioResp = await fetch('/audio/' + filename);
-    if (!audioResp.ok) {
-      throw new Error('fetch failed: ' + audioResp.status + ' ' + audioResp.statusText);
-    }
+    if (!audioResp.ok) throw new Error('fetch failed: ' + audioResp.status);
     const arrayBuffer = await audioResp.arrayBuffer();
-    const t_fetch_end = performance.now();
-
-    const t_decode_start = performance.now();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    const t_decode_end = performance.now();
 
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
@@ -469,35 +639,23 @@ async function playAudio(filename, text) {
     source.onended = () => {
       isSpeaking = false;
       currentSource = null;
-      statusEl.textContent = 'Listening...';
-      agentEl.className = 'container';
+      updatePipelineUI('idle');
       setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
     };
 
-    const t_play_start = performance.now();
     source.start(0);
-
-    const fetch_ms = (t_fetch_end - t_fetch_start).toFixed(0);
-    const decode_ms = (t_decode_end - t_decode_start).toFixed(0);
-    const play_overhead_ms = (t_play_start - t_decode_end).toFixed(0);
-    const client_total_ms = (t_play_start - t_fetch_start).toFixed(0);
-    debug(
-      `CLIENT_BENCH | fetch=${fetch_ms}ms decode=${decode_ms}ms play_overhead=${play_overhead_ms}ms ` +
-      `client_total=${client_total_ms}ms | ${audioBuffer.duration.toFixed(1)}s ${audioBuffer.sampleRate}Hz`
-    );
-
+    debug('playing ' + audioBuffer.duration.toFixed(1) + 's audio');
   } catch (e) {
-    const errDetail = e?.message || e?.name || (e instanceof Event ? `Event(type=${e.type})` : String(e));
-    debug('audio_error: ' + errDetail + ' | fetch_status=' + (audioResp?.status || 'n/a'));
+    debug('audio_error: ' + (e?.message || e));
     isSpeaking = false;
     currentSource = null;
-    statusEl.textContent = 'Listening...';
-    agentEl.className = 'container';
+    updatePipelineUI('idle');
   }
 }
 
-statusEl.textContent = 'Listening...';
-pollInterval = setInterval(pollAudio, 500);
+updatePipelineUI('idle');
+setInterval(pollAudio, 500);
+setInterval(pollSessionState, 1000);
 </script>
 </body>
 </html>

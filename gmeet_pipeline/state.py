@@ -19,8 +19,14 @@ class BotSession:
     conversation: list = field(default_factory=list)  # [{role, content}] for LLM
     speaking: bool = False
     respond_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    response_queue: asyncio.Queue = field(default_factory=asyncio.Queue)  # queued speaker messages
     last_processed_ts: str = ""
     expanded_entries: set = field(default_factory=set)  # voice gateway EXPAND tracking
+    participants: dict = field(default_factory=dict)  # {name: {join_ts, is_speaking}}
+    pipeline_state: str = "idle"  # idle | queuing | llm | tts | speaking
+    last_llm_ms: int = 0
+    last_tts_ms: int = 0
+    last_total_ms: int = 0
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -60,6 +66,12 @@ class BotRegistry:
                     "meeting_url": s.meeting_url,
                     "status": s.status,
                     "speaking": s.speaking,
+                    "pipeline_state": s.pipeline_state,
+                    "last_llm_ms": s.last_llm_ms,
+                    "last_tts_ms": s.last_tts_ms,
+                    "last_total_ms": s.last_total_ms,
+                    "queue_depth": s.response_queue.qsize(),
+                    "participants": list(s.participants.keys()),
                     "last_processed_ts": s.last_processed_ts,
                     "transcript_count": len(s.transcript),
                     "conversation_count": len(s.conversation),

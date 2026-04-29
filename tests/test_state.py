@@ -133,6 +133,8 @@ class TestBotRegistryListBots:
         bot_data = result["test-bot-001"]
         expected_keys = {
             "bot_id", "meeting_url", "status", "speaking",
+            "pipeline_state", "last_llm_ms", "last_tts_ms", "last_total_ms",
+            "queue_depth", "participants",
             "last_processed_ts", "transcript_count",
             "conversation_count", "created_at",
         }

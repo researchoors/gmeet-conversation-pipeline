@@ -142,6 +142,29 @@ class GmeetServer:
         async def list_bots():
             return await self.registry.list_bots()
 
+        @app.get("/api/session-state")
+        async def session_state():
+            """Rich session state for agent page debug overlay."""
+            bots = []
+            for bot_id in self.registry._bots:
+                session = self.registry.get(bot_id)
+                if not session:
+                    continue
+                bots.append({
+                    "bot_id": bot_id,
+                    "status": session.status,
+                    "pipeline_state": session.pipeline_state,
+                    "speaking": session.speaking,
+                    "queue_depth": session.response_queue.qsize(),
+                    "participants": list(session.participants.keys()),
+                    "last_llm_ms": session.last_llm_ms,
+                    "last_tts_ms": session.last_tts_ms,
+                    "last_total_ms": session.last_total_ms,
+                    "transcript_count": len(session.transcript),
+                    "last_transcript": session.transcript[-1] if session.transcript else None,
+                })
+            return {"bots": bots, "llm_routing": self.settings.llm_routing, "tts_backend": self.settings.tts_backend}
+
         @app.get("/api/audio-queue")
         async def get_audio_queue():
             all_items = []
