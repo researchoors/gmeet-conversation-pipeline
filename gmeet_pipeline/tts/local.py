@@ -71,8 +71,23 @@ class LocalTTS(BaseTTS):
         if self._initialized:
             return
 
-        # --- Kokoro ---
+        # --- espeak-ng lib + data path (macOS brew) ---
         try:
+            import os
+            espeak_data = "/opt/homebrew/Cellar/espeak-ng/1.52.0/share/espeak-ng-data"
+            if os.path.isdir(espeak_data):
+                os.environ.setdefault("ESPEAK_DATA_PATH", espeak_data)
+            espeak_lib = "/opt/homebrew/lib/libespeak-ng.dylib"
+            if os.path.exists(espeak_lib):
+                import ctypes
+                ctypes.cdll.LoadLibrary(espeak_lib)
+        except Exception:
+            pass
+
+        # --- Kokoro (pre-init spacy to avoid circular import) ---
+        try:
+            import spacy
+            import spacy.util   # fully init spacy first (circular import workaround)
             from kokoro import KPipeline  # type: ignore[import-untyped]
 
             self._kokoro_pipeline = KPipeline(lang_code="a")
