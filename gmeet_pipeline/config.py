@@ -56,7 +56,7 @@ class GmeetSettings(BaseSettings):
 
     # ── Backend selectors ──────────────────────────────────────────────
     tts_backend: Literal["elevenlabs", "local"] = "local"
-    llm_routing: Literal["simple", "voice_gateway"] = "simple"
+    llm_routing: Literal["simple", "voice_gateway", "flash"] = "flash"
 
     # ── Paths ──────────────────────────────────────────────────────────
     hermes_home: str = str(Path.home() / ".hermes")

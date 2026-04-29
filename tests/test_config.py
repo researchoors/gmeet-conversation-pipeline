@@ -61,7 +61,7 @@ class TestGmeetSettingsDefaults:
     def test_backend_selector_defaults(self):
         s = GmeetSettings()
         assert s.tts_backend == "local"
-        assert s.llm_routing == "simple"
+        assert s.llm_routing == "flash"
 
     def test_hermes_home_default(self):
         s = GmeetSettings()
