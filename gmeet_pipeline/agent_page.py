@@ -173,13 +173,24 @@ function playFallbackAudio(url) {
   if (audioCtx.state === 'suspended') audioCtx.resume();
 
   const audio = new Audio(url);
+  audio.onerror = (e) => {
+    debug('fallback_audio_error: ' + (e?.message || 'Event(type=' + e.type + ')') + ' src=' + url);
+    isSpeaking = false;
+    statusEl.textContent = 'Listening...';
+    agentEl.className = 'container';
+  };
   audio.onended = () => {
     statusEl.textContent = 'Listening...';
     agentEl.className = 'container';
     isSpeaking = false;
     setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
   };
-  audio.play();
+  audio.play().catch(e => {
+    debug('fallback_play_error: ' + e?.message);
+    isSpeaking = false;
+    statusEl.textContent = 'Listening...';
+    agentEl.className = 'container';
+  });
 }
 
 function startSpeaking(text, sampleRate) {
@@ -440,6 +451,9 @@ async function playAudio(filename, text) {
 
     const t_fetch_start = performance.now();
     const audioResp = await fetch('/audio/' + filename);
+    if (!audioResp.ok) {
+      throw new Error('fetch failed: ' + audioResp.status + ' ' + audioResp.statusText);
+    }
     const arrayBuffer = await audioResp.arrayBuffer();
     const t_fetch_end = performance.now();
 
@@ -473,7 +487,8 @@ async function playAudio(filename, text) {
     );
 
   } catch (e) {
-    debug('audio_error: ' + String(e));
+    const errDetail = e?.message || e?.name || (e instanceof Event ? `Event(type=${e.type})` : String(e));
+    debug('audio_error: ' + errDetail + ' | fetch_status=' + (audioResp?.status || 'n/a'));
     isSpeaking = false;
     currentSource = null;
     statusEl.textContent = 'Listening...';

@@ -55,7 +55,7 @@ class GmeetSettings(BaseSettings):
     port: int = 9120
 
     # ── Backend selectors ──────────────────────────────────────────────
-    tts_backend: Literal["elevenlabs", "local"] = "elevenlabs"
+    tts_backend: Literal["elevenlabs", "local"] = "local"
     llm_routing: Literal["simple", "voice_gateway"] = "simple"
 
     # ── Paths ──────────────────────────────────────────────────────────

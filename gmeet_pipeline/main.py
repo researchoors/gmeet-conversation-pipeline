@@ -16,6 +16,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
 )
+# Suppress noisy uvicorn access logs for audio-queue polling
+logging.getLogger("uvicorn.access").addFilter(
+    type("AQFilter", (), {
+        "filter": lambda self, record: "/api/audio-queue" not in record.getMessage()
+    })()
+)
 logger = logging.getLogger("gmeet_pipeline.main")
 
 
