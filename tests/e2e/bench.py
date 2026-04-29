@@ -88,6 +88,9 @@ class BenchTTS(BaseTTS):
         filename = f"bench_{uuid.uuid4().hex[:8]}.wav"
         filepath = Path(self._audio_dir) / filename
 
+        # Ensure directory exists
+        Path(self._audio_dir).mkdir(parents=True, exist_ok=True)
+
         data = b"\x00\x00" * num_samples
         fmt_chunk = b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16)
         data_chunk = b"data" + struct.pack("<I", len(data)) + data
@@ -223,10 +226,11 @@ async def main(iterations: int = 20, output: Optional[str] = None):
             openrouter_key="bench-or-key",
             tts_backend="local",
             llm_routing="simple",
-            audio_dir=audio_dir,
+            hermes_home=str(Path(tmpdir) / "hermes"),
         )
 
         llm = BenchLLM(base_ms=100, jitter_ms=30)
+        audio_dir = str(settings.audio_dir)
         tts = BenchTTS(audio_dir=audio_dir, base_ms=20, jitter_ms=10)
         transport = MockTransport()
         registry = BotRegistry()
