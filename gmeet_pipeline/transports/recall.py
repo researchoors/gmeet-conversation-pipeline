@@ -8,10 +8,11 @@ logger = logging.getLogger("gmeet_pipeline.transports.recall")
 
 
 class RecallTransport(BaseTransport):
-    def __init__(self, api_key: str, base_url: str, service_url: str):
+    def __init__(self, api_key: str, base_url: str, service_url: str, webhook_secret: str = ""):
         self.api_key = api_key
         self.base_url = base_url
         self.service_url = service_url
+        self.webhook_secret = webhook_secret
 
     async def join(self, meeting_url: str, bot_name: str = "Hank Bob", **kwargs) -> dict:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -46,7 +47,7 @@ class RecallTransport(BaseTransport):
                         "realtime_endpoints": [
                             {
                                 "type": "webhook",
-                                "url": f"{self.service_url}/webhook/recall",
+                                "url": f"{self.service_url}/webhook/recall/{self.webhook_secret}" if self.webhook_secret else f"{self.service_url}/webhook/recall",
                                 "events": [
                                     "transcript.data",
                                     "transcript.partial_data",

@@ -58,6 +58,10 @@ class GmeetSettings(BaseSettings):
     tts_backend: Literal["elevenlabs", "local"] = "local"
     llm_routing: Literal["simple", "voice_gateway", "flash"] = "flash"
 
+    # ── Auth ──────────────────────────────────────────────────────────
+    api_key: str = ""  # Bearer token for admin endpoints (GMEET_API_KEY)
+    webhook_secret: str = ""  # Secret embedded in webhook URL path (GMEET_WEBHOOK_SECRET)
+
     # ── Paths ──────────────────────────────────────────────────────────
     hermes_home: str = str(Path.home() / ".hermes")
 

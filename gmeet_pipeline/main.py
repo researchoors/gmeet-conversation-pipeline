@@ -48,6 +48,7 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
             api_key=settings.recall_api_key,
             base_url=settings.recall_base,
             service_url=settings.service_url,
+            webhook_secret=settings.webhook_secret,
         )
     else:
         logger.warning("No RECALL_API_KEY — transport will not work")

@@ -214,6 +214,8 @@ def mock_settings(tmp_path):
         tts_backend="local",
         llm_routing="flash",
         hermes_home=str(tmp_path / "hermes"),
+        api_key="test-api-key",
+        webhook_secret="test-wh-secret",
     )
 
 
