@@ -103,6 +103,13 @@ class FlashLLM(BaseLLM):
                         "messages": messages,
                         "max_tokens": 300,
                         "temperature": 0.7,
+                        "extra": {
+                            "google": {
+                                "thinking_config": {
+                                    "thinking_budget": 0,
+                                }
+                            }
+                        },
                     },
                 )
 

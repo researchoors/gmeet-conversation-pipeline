@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .state import BotRegistry, BotSession
-from .llm.base import BaseLLM
+from .llm.base import BaseLLM, SILENT_TOKENS
 from .tts.base import BaseTTS
 from .ws_manager import ConnectionManager
 
@@ -224,7 +224,13 @@ class RecallWebhookHandler:
                 session.pipeline_state = "idle"
 
     async def _process_batch_inner(self, bot_id: str, messages: list[dict]):
-        """Process a batch of speaker messages through LLM → TTS → audio."""
+        """Process a batch of speaker messages through LLM → TTS → audio.
+
+        Uses streaming when available: the LLM yields sentence chunks
+        as they're produced, and each chunk is sent to TTS immediately.
+        This pipelines LLM generation with TTS synthesis, cutting
+        first-audio latency significantly.
+        """
         session = self.registry.get(bot_id)
         if not session:
             return
@@ -242,64 +248,97 @@ class RecallWebhookHandler:
             context_msg = " | ".join(parts)
             speaker = messages[-1]["speaker"]  # last speaker for logging
 
-        # LLM
+        # LLM (streaming)
         session.pipeline_state = "llm"
         t1 = asyncio.get_event_loop().time()
         bot_state = {
             "expanded_entries": session.expanded_entries,
             "participants": list(session.participants.keys()),
         }
-        response_text = await self.llm.generate(session.conversation, context_msg, bot_state=bot_state)
-        t2 = asyncio.get_event_loop().time()
-        llm_ms = (t2 - t1) * 1000
-        session.last_llm_ms = int(llm_ms)
 
-        if not response_text:
+        full_response = ""
+        first_audio_queued = False
+        chunk_count = 0
+
+        async for sentence_chunk in self.llm.generate_stream(
+            session.conversation, context_msg, bot_state=bot_state
+        ):
+            chunk_count += 1
+            t_chunk = asyncio.get_event_loop().time()
+
+            if chunk_count == 1:
+                llm_ms = (t_chunk - t1) * 1000
+                session.last_llm_ms = int(llm_ms)
+
+            # Check for silent tokens
+            if sentence_chunk.upper() in SILENT_TOKENS:
+                continue
+
+            full_response += " " + sentence_chunk
+
+            # Fire TTS for this sentence chunk immediately
+            session.pipeline_state = "tts"
+            session.speaking = True
+            t_tts_start = asyncio.get_event_loop().time()
+            try:
+                result = await asyncio.wait_for(
+                    self.tts.generate(sentence_chunk.strip(), bot_id),
+                    timeout=15.0,
+                )
+                t_tts_end = asyncio.get_event_loop().time()
+                tts_ms = (t_tts_end - t_tts_start) * 1000
+                session.last_tts_ms = int(tts_ms)
+
+                if result:
+                    total_ms = (t_tts_end - t0) * 1000
+                    session.last_total_ms = int(total_ms)
+
+                    if not first_audio_queued:
+                        first_audio_queued = True
+                        logger.info(
+                            f"FIRST-AUDIO | llm_to_first_chunk={llm_ms:.0f}ms "
+                            f"tts={tts_ms:.0f}ms total={total_ms:.0f}ms"
+                        )
+
+                    session.pipeline_state = "speaking"
+                    self.audio_queue.setdefault(bot_id, []).append({
+                        "filename": result,
+                        "text": sentence_chunk.strip(),
+                    })
+                    logger.info(
+                        f"Stream chunk {chunk_count}: tts={tts_ms:.0f}ms audio={result}"
+                    )
+            except asyncio.TimeoutError:
+                logger.error(f"TTS timeout on chunk {chunk_count}")
+            except Exception as exc:
+                logger.error(f"TTS error on chunk {chunk_count}: {exc}")
+
+        # After stream completes
+        t2 = asyncio.get_event_loop().time()
+        total_llm_ms = (t2 - t1) * 1000
+        session.last_llm_ms = int(total_llm_ms)
+
+        session.speaking = False
+
+        if not full_response.strip():
             logger.info(f"Hank chose to stay silent after {speaker}'s message")
             session.pipeline_state = "idle"
             return
 
-        logger.info(f"Hank responds: {response_text}")
+        full_response = full_response.strip()
+        logger.info(f"Hank responds ({chunk_count} chunks): {full_response}")
 
-        session.conversation.append({"role": "assistant", "content": response_text})
+        # Update conversation and transcript with full response
+        session.conversation.append({"role": "assistant", "content": full_response})
         session.transcript.append({
             "speaker": "Hank Bob",
-            "text": response_text,
+            "text": full_response,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        # TTS
-        session.pipeline_state = "tts"
-        session.speaking = True
-        t3 = asyncio.get_event_loop().time()
-        logger.info(f"TTS generate starting for: {response_text[:60]}...")
-        try:
-            result = await asyncio.wait_for(
-                self.tts.generate(response_text, bot_id),
-                timeout=30.0,
-            )
-            t4 = asyncio.get_event_loop().time()
-            tts_ms = (t4 - t3) * 1000
-            session.last_tts_ms = int(tts_ms)
-
-            if result:
-                total_ms = (t4 - t0) * 1000
-                session.last_total_ms = int(total_ms)
-                session.pipeline_state = "speaking"
-                logger.info(
-                    f"BENCH | llm={llm_ms:.0f}ms tts={tts_ms:.0f}ms "
-                    f"total_server={total_ms:.0f}ms | audio={result}"
-                )
-                # Add to audio queue so the agent page can play it
-                self.audio_queue.setdefault(bot_id, []).append({
-                    "filename": result,
-                    "text": response_text,
-                })
-                logger.info(f"Audio queue now: {list(self.audio_queue.keys())} = {[(k, len(v)) for k, v in self.audio_queue.items()]}")
-            else:
-                logger.error("TTS generation failed — no audio produced")
-                session.pipeline_state = "idle"
-        finally:
-            session.speaking = False
-            # Pipeline returns to idle after audio is queued
-            # (actual speaking state is managed by agent page playback)
+        total_ms = (t2 - t0) * 1000
+        session.last_total_ms = int(total_ms)
+        logger.info(
+            f"BENCH | total_llm={total_llm_ms:.0f}ms chunks={chunk_count} "
+            f"total_server={total_ms:.0f}ms"
+        )

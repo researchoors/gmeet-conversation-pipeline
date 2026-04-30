@@ -67,7 +67,19 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
         logger.info(f"Memory: {len(memory_snapshot.entries)} entries loaded")
 
     # LLM
-    if settings.llm_routing == "flash":
+    if settings.llm_routing == "local":
+        from .context_builder import ContextBuilder
+        from .llm.local import LocalLLM
+        context_builder = ContextBuilder(
+            memories_dir=Path(settings.hermes_home) / "memories",
+            sessions_dir=Path(settings.hermes_home) / "sessions",
+        )
+        llm = LocalLLM(
+            model_id=settings.local_model_id,
+            context_builder=context_builder,
+        )
+        logger.info(f"LLM: {settings.local_model_id} (local MLX)")
+    elif settings.llm_routing == "flash":
         from .context_builder import ContextBuilder
         from .llm.flash import FlashLLM
         context_builder = ContextBuilder(
@@ -156,8 +168,8 @@ def main():
     if not settings.recall_api_key:
         print("ERROR: RECALL_API_KEY not found")
         sys.exit(1)
-    if not settings.openrouter_key:
-        print("ERROR: OPENROUTER_API_KEY not found")
+    if settings.llm_routing != "local" and not settings.openrouter_key:
+        print("ERROR: OPENROUTER_API_KEY not found (not needed for local LLM)")
         sys.exit(1)
     if settings.tts_backend == "elevenlabs" and not settings.elevenlabs_key:
         print("ERROR: ELEVENLABS_API_KEY not found")

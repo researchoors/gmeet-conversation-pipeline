@@ -56,7 +56,9 @@ class GmeetSettings(BaseSettings):
 
     # ── Backend selectors ──────────────────────────────────────────────
     tts_backend: Literal["elevenlabs", "local"] = "local"
-    llm_routing: Literal["simple", "voice_gateway", "flash"] = "flash"
+    llm_routing: Literal["simple", "voice_gateway", "flash", "local"] = "local"
+    # Local MLX model ID (HuggingFace repo)
+    local_model_id: str = "mlx-community/Qwen3.5-35B-A3B-4bit"
 
     # ── Auth ──────────────────────────────────────────────────────────
     api_key: str = ""  # Bearer token for admin endpoints (GMEET_API_KEY)
