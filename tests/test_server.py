@@ -50,6 +50,8 @@ def test_settings(tmp_path):
         tts_backend="elevenlabs",
         llm_routing="simple",
         hermes_home=str(tmp_path / ".hermes"),
+        api_key="test-api-key",
+        webhook_secret="test-wh-secret",
     )
 
 
@@ -160,7 +162,7 @@ class TestBotsEndpoint:
     """Test /api/bots endpoint returns bot list."""
 
     def test_bots_empty(self, client):
-        response = client.get("/api/bots")
+        response = client.get("/api/bots", headers={"Authorization": "Bearer test-api-key"})
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, dict)
@@ -171,10 +173,18 @@ class TestBotsEndpoint:
         session = BotSession(bot_id="bot-1", meeting_url="https://meet.google.com/test")
         server.registry._bots["bot-1"] = session
 
-        response = client.get("/api/bots")
+        response = client.get("/api/bots", headers={"Authorization": "Bearer test-api-key"})
         assert response.status_code == 200
         data = response.json()
         assert "bot-1" in data
+
+    def test_bots_requires_auth(self, client):
+        response = client.get("/api/bots")
+        assert response.status_code == 401
+
+    def test_bots_wrong_key(self, client):
+        response = client.get("/api/bots", headers={"Authorization": "Bearer wrong-key"})
+        assert response.status_code == 401
 
 
 class TestWebhookEndpoint:
@@ -183,7 +193,7 @@ class TestWebhookEndpoint:
     def test_webhook_delegates(self, server, client):
         with patch.object(server.webhook_handler, "handle", new_callable=AsyncMock, return_value={"ok": True}) as mock:
             response = client.post(
-                "/webhook/recall",
+                "/webhook/recall/test-wh-secret",
                 json={"event": "test", "data": {}},
             )
             assert response.status_code == 200
@@ -191,11 +201,18 @@ class TestWebhookEndpoint:
     def test_webhook_returns_handler_result(self, server, client):
         with patch.object(server.webhook_handler, "handle", new_callable=AsyncMock, return_value={"ok": True}):
             response = client.post(
-                "/webhook/recall",
+                "/webhook/recall/test-wh-secret",
                 json={"event": "test", "data": {}},
             )
             data = response.json()
             assert data["ok"] is True
+
+    def test_webhook_wrong_secret(self, client):
+        response = client.post(
+            "/webhook/recall/wrong-secret",
+            json={"event": "test", "data": {}},
+        )
+        assert response.status_code == 401
 
 
 class TestAgentPageRoute:
@@ -211,7 +228,7 @@ class TestJoinEndpoint:
     """Test /api/bot/join creates a bot session."""
 
     def test_join_requires_meeting_url(self, client):
-        response = client.post("/api/bot/join", json={})
+        response = client.post("/api/bot/join", json={}, headers={"Authorization": "Bearer test-api-key"})
         assert response.status_code == 400
 
     def test_join_creates_session(self, server, client):
@@ -219,7 +236,12 @@ class TestJoinEndpoint:
             response = client.post(
                 "/api/bot/join",
                 json={"meeting_url": "https://meet.google.com/new"},
+                headers={"Authorization": "Bearer test-api-key"},
             )
             assert response.status_code == 200
             data = response.json()
             assert data["bot_id"] == "new-bot"
+
+    def test_join_requires_auth(self, client):
+        response = client.post("/api/bot/join", json={"meeting_url": "https://meet.google.com/new"})
+        assert response.status_code == 401

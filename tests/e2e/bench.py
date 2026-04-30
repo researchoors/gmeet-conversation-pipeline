@@ -156,7 +156,7 @@ async def run_benchmark(
         payload = make_transcript_data(bot_id, speaker, text)
 
         t_send = time.monotonic()
-        resp = await client.post("/webhook/recall", json=payload)
+        resp = await client.post("/webhook/recall/test-wh-secret", json=payload)
         t_webhook = time.monotonic()
 
         assert resp.status_code == 200
@@ -198,7 +198,7 @@ async def run_concurrency_benchmark(
     async def single_bot(bot_id: str) -> dict:
         payload = make_transcript_data(bot_id, "Alice", "concurrent test message")
         t0 = time.monotonic()
-        resp = await client.post("/webhook/recall", json=payload)
+        resp = await client.post("/webhook/recall/test-wh-secret", json=payload)
         t1 = time.monotonic()
         assert resp.status_code == 200
         return {"bot_id": bot_id, "webhook_ms": round((t1 - t0) * 1000, 1)}
@@ -261,7 +261,7 @@ async def main(iterations: int = 20, output: Optional[str] = None):
                     resp = await client.post("/api/bot/join", json={
                         "meeting_url": f"bench://{scenario_name}/{i}",
                         "bot_name": "Hank Bob",
-                    })
+                    }, headers={"Authorization": "Bearer test-api-key"})
                     bot_id = resp.json()["bot_id"]
 
                     # Clear audio queue from previous iterations
@@ -313,7 +313,7 @@ async def main(iterations: int = 20, output: Optional[str] = None):
                     resp = await client.post("/api/bot/join", json={
                         "meeting_url": f"bench://concurrent/{concurrency}",
                         "bot_name": "Hank Bob",
-                    })
+                    }, headers={"Authorization": "Bearer test-api-key"})
                     bot_ids.append(resp.json()["bot_id"])
 
                 server.audio_queue.clear()

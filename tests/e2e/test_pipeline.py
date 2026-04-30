@@ -24,12 +24,15 @@ from . import (
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+AUTH_HEADERS = {"Authorization": "Bearer test-api-key"}
+
+
 async def create_bot(client) -> str:
     """Join a meeting and return the bot_id."""
     resp = await client.post("/api/bot/join", json={
         "meeting_url": "https://meet.google.com/test-e2e",
         "bot_name": "Hank Bob",
-    })
+    }, headers=AUTH_HEADERS)
     assert resp.status_code == 200
     return resp.json()["bot_id"]
 
@@ -37,7 +40,7 @@ async def create_bot(client) -> str:
 async def send_transcript(client, bot_id: str, speaker: str, text: str) -> dict:
     """Send a transcript.data webhook and return the response."""
     payload = make_transcript_data(bot_id, speaker, text)
-    resp = await client.post("/webhook/recall", json=payload)
+    resp = await client.post("/webhook/recall/test-wh-secret", json=payload)
     assert resp.status_code == 200
     return resp.json()
 
@@ -109,7 +112,7 @@ async def test_partial_transcripts_ignored(e2e_client):
     bot_id = await create_bot(e2e_client)
 
     payload = make_partial_transcript(bot_id, "Alice", "hello I'm still talking")
-    resp = await e2e_client.post("/webhook/recall", json=payload)
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=payload)
     assert resp.status_code == 200
 
     await asyncio.sleep(0.3)
@@ -132,7 +135,7 @@ async def test_status_change_updates_session(e2e_client):
     """Bot status changes should update the session."""
     bot_id = await create_bot(e2e_client)
 
-    resp = await e2e_client.post("/webhook/recall", json=make_status_change(bot_id, "in_meeting"))
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=make_status_change(bot_id, "in_meeting"))
     assert resp.status_code == 200
 
     session = e2e_client._registry.get(bot_id)
@@ -144,7 +147,7 @@ async def test_call_ended_updates_session(e2e_client):
     """Bot.call_ended should set session status to 'ended'."""
     bot_id = await create_bot(e2e_client)
 
-    resp = await e2e_client.post("/webhook/recall", json=make_call_ended(bot_id))
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=make_call_ended(bot_id))
     assert resp.status_code == 200
 
     session = e2e_client._registry.get(bot_id)
@@ -156,10 +159,10 @@ async def test_participant_events(e2e_client):
     """Participant join/leave should be logged without errors."""
     bot_id = await create_bot(e2e_client)
 
-    resp = await e2e_client.post("/webhook/recall", json=make_participant_join(bot_id, "Alice"))
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=make_participant_join(bot_id, "Alice"))
     assert resp.status_code == 200
 
-    resp = await e2e_client.post("/webhook/recall", json=make_participant_leave(bot_id, "Alice"))
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=make_participant_leave(bot_id, "Alice"))
     assert resp.status_code == 200
 
 
@@ -203,7 +206,7 @@ async def test_tts_failure_no_audio(e2e_client, mock_settings):
 async def test_unknown_bot_transcript_ignored(e2e_client):
     """Transcript for an unregistered bot_id should be ignored gracefully."""
     payload = make_transcript_data("nonexistent-bot-id", "Alice", "hello")
-    resp = await e2e_client.post("/webhook/recall", json=payload)
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=payload)
     assert resp.status_code == 200  # doesn't crash
 
     await asyncio.sleep(0.2)
@@ -216,7 +219,7 @@ async def test_empty_transcript_ignored(e2e_client):
     bot_id = await create_bot(e2e_client)
 
     payload = make_transcript_data(bot_id, "Alice", "")
-    resp = await e2e_client.post("/webhook/recall", json=payload)
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json=payload)
     assert resp.status_code == 200
 
     await asyncio.sleep(0.2)
@@ -228,7 +231,7 @@ async def test_unhandled_event_type(e2e_client):
     """Unknown event types should return ok without crashing."""
     bot_id = await create_bot(e2e_client)
 
-    resp = await e2e_client.post("/webhook/recall", json={
+    resp = await e2e_client.post("/webhook/recall/test-wh-secret", json={
         "event": "recording.done",
         "data": {"bot": {"id": bot_id}},
     })
@@ -265,7 +268,7 @@ async def test_audio_file_served(e2e_client):
 @pytest.mark.asyncio
 async def test_bots_list(e2e_client):
     bot_id = await create_bot(e2e_client)
-    resp = await e2e_client.get("/api/bots")
+    resp = await e2e_client.get("/api/bots", headers=AUTH_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert bot_id in data
@@ -273,5 +276,5 @@ async def test_bots_list(e2e_client):
 
 @pytest.mark.asyncio
 async def test_join_without_meeting_url(e2e_client):
-    resp = await e2e_client.post("/api/bot/join", json={"bot_name": "Hank"})
+    resp = await e2e_client.post("/api/bot/join", json={"bot_name": "Hank"}, headers=AUTH_HEADERS)
     assert resp.status_code == 400

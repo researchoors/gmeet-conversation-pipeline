@@ -48,13 +48,14 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
             api_key=settings.recall_api_key,
             base_url=settings.recall_base,
             service_url=settings.service_url,
+            webhook_secret=settings.webhook_secret,
         )
     else:
         logger.warning("No RECALL_API_KEY — transport will not work")
         from .transports.base import BaseTransport
         transport = None  # type: ignore
 
-    # Memory (optional, for voice gateway routing)
+    # Memory snapshot (only for legacy voice_gateway routing)
     memory_snapshot = None
     if settings.llm_routing == "voice_gateway":
         from .memory import MemorySnapshot
@@ -66,7 +67,22 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
         logger.info(f"Memory: {len(memory_snapshot.entries)} entries loaded")
 
     # LLM
-    if settings.llm_routing == "voice_gateway":
+    if settings.llm_routing == "flash":
+        from .context_builder import ContextBuilder
+        from .llm.flash import FlashLLM
+        context_builder = ContextBuilder(
+            memories_dir=Path(settings.hermes_home) / "memories",
+            sessions_dir=Path(settings.hermes_home) / "sessions",
+        )
+        context = context_builder.build()
+        llm = FlashLLM(
+            api_key=settings.openrouter_key,
+            model=settings.llm_model,
+            service_url=settings.service_url,
+            context_builder=context_builder,
+        )
+        logger.info(f"LLM: {settings.llm_model} (flash mode, {len(context)} chars context)")
+    elif settings.llm_routing == "voice_gateway":
         from .llm.openrouter import VoiceGatewayLLM
         llm = VoiceGatewayLLM(
             api_key=settings.openrouter_key,

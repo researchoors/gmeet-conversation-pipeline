@@ -212,8 +212,10 @@ def mock_settings(tmp_path):
         recall_api_key="test-key",
         openrouter_key="test-or-key",
         tts_backend="local",
-        llm_routing="simple",
+        llm_routing="flash",
         hermes_home=str(tmp_path / "hermes"),
+        api_key="test-api-key",
+        webhook_secret="test-wh-secret",
     )
 
 

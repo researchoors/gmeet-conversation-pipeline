@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import GmeetSettings
 from .state import BotRegistry
@@ -21,6 +22,50 @@ from .webhook import RecallWebhookHandler
 
 
 logger = logging.getLogger("gmeet_pipeline.server")
+
+# Paths that the bot's Chrome tab needs — no auth required
+_OPEN_PATHS = {"/", "/health"}
+_OPEN_PREFIXES = ("/audio/", "/api/audio-queue", "/api/transcript", "/api/debug", "/api/session-state", "/ws/")
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """API key auth for admin endpoints; webhook secret for Recall; open for bot-facing."""
+
+    def __init__(self, app, api_key: str, webhook_secret: str):
+        super().__init__(app)
+        self.api_key = api_key
+        self.webhook_secret = webhook_secret
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Open paths — no auth
+        if path in _OPEN_PATHS or any(path.startswith(p) for p in _OPEN_PREFIXES):
+            return await call_next(request)
+
+        # Webhook — validate secret in URL path
+        if path.startswith("/webhook/recall"):
+            if self.webhook_secret:
+                # Expected path: /webhook/recall/{secret}
+                parts = path.rstrip("/").split("/")
+                if len(parts) >= 4 and parts[3] == self.webhook_secret:
+                    # Rewrite to the handler path without the secret
+                    request.scope["path"] = "/webhook/recall"
+                    request.scope["raw_path"] = b"/webhook/recall"
+                    return await call_next(request)
+                return JSONResponse({"error": "invalid webhook secret"}, status_code=401)
+            # No secret configured — allow (backward compat)
+            return await call_next(request)
+
+        # Admin endpoints — require Bearer token
+        if self.api_key:
+            auth = request.headers.get("Authorization", "")
+            if auth == f"Bearer {self.api_key}":
+                return await call_next(request)
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        # No API key configured — allow all (backward compat)
+        return await call_next(request)
 
 
 class GmeetServer:
@@ -54,6 +99,11 @@ class GmeetServer:
         )
 
         self.app = FastAPI(title="Hank Bob Meeting Agent")
+        self.app.add_middleware(
+            AuthMiddleware,
+            api_key=self.settings.api_key,
+            webhook_secret=self.settings.webhook_secret,
+        )
         self._register_routes()
 
     def _register_routes(self):
@@ -141,6 +191,29 @@ class GmeetServer:
         @app.get("/api/bots")
         async def list_bots():
             return await self.registry.list_bots()
+
+        @app.get("/api/session-state")
+        async def session_state():
+            """Rich session state for agent page debug overlay."""
+            bots = []
+            for bot_id in self.registry._bots:
+                session = self.registry.get(bot_id)
+                if not session:
+                    continue
+                bots.append({
+                    "bot_id": bot_id,
+                    "status": session.status,
+                    "pipeline_state": session.pipeline_state,
+                    "speaking": session.speaking,
+                    "queue_depth": session.response_queue.qsize(),
+                    "participants": list(session.participants.keys()),
+                    "last_llm_ms": session.last_llm_ms,
+                    "last_tts_ms": session.last_tts_ms,
+                    "last_total_ms": session.last_total_ms,
+                    "transcript_count": len(session.transcript),
+                    "last_transcript": session.transcript[-1] if session.transcript else None,
+                })
+            return {"bots": bots, "llm_routing": self.settings.llm_routing, "tts_backend": self.settings.tts_backend}
 
         @app.get("/api/audio-queue")
         async def get_audio_queue():
