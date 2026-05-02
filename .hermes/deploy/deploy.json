@@ -1,0 +1,17 @@
+{
+  "service": "gmeet-pipeline",
+  "runtime": "nomad",
+  "nomad": {
+    "controller": "researchoors-main",
+    "namespace": "default",
+    "job_file": ".hermes/deploy/nomad/gmeet-pipeline.nomad"
+  },
+  "approval": {
+    "risk": "standard",
+    "approvers": ["ethan"],
+    "ttl_seconds": 1800
+  },
+  "triggers": {
+    "github": ["release.published"]
+  }
+}
