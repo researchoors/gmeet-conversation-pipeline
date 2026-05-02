@@ -8,7 +8,6 @@
   },
   "approval": {
     "risk": "standard",
-    "approvers": ["ethan"],
     "ttl_seconds": 1800
   },
   "triggers": {
