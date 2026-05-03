@@ -55,6 +55,7 @@ jobs:
             --arg actor "$ACTOR" \
             --arg service "$SERVICE" \
             --arg environment "$ENVIRONMENT" \
+            --arg orchestrator "nomad" \
             --arg nomad_job_file "$NOMAD_JOB_FILE" \
             --arg nomad_command "$nomad_command" \
             '{
@@ -66,6 +67,7 @@ jobs:
               actor: $actor,
               service: $service,
               environment: $environment,
+              orchestrator: $orchestrator,
               requested_by: "github-actions",
               nomad_job_file: $nomad_job_file,
               nomad_command: $nomad_command
