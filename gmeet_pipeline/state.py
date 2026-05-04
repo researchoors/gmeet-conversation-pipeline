@@ -23,10 +23,14 @@ class BotSession:
     last_processed_ts: str = ""
     expanded_entries: set = field(default_factory=set)  # voice gateway EXPAND tracking
     participants: dict = field(default_factory=dict)  # {name: {join_ts, is_speaking}}
+    response_mode: str = "active"  # active | silent_transcribe
+    mode_events: list = field(default_factory=list)  # [{mode, reason, speaker, text, timestamp}]
+    action_candidates: list = field(default_factory=list)  # generic post-call action candidates
     pipeline_state: str = "idle"  # idle | queuing | llm | tts | speaking
     last_llm_ms: int = 0
     last_tts_ms: int = 0
     last_total_ms: int = 0
+    post_call_finalized: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -72,6 +76,9 @@ class BotRegistry:
                     "last_total_ms": s.last_total_ms,
                     "queue_depth": s.response_queue.qsize(),
                     "participants": list(s.participants.keys()),
+                    "response_mode": s.response_mode,
+                    "mode_event_count": len(s.mode_events),
+                    "action_candidate_count": len(s.action_candidates),
                     "last_processed_ts": s.last_processed_ts,
                     "transcript_count": len(s.transcript),
                     "conversation_count": len(s.conversation),

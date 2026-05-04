@@ -45,7 +45,12 @@ Multi-speaker rules:
 - Multiple people may be in the call. Messages are prefixed with the speaker's name (e.g. "Ethan: ...")
 - Address people by name when replying, especially if multiple people are talking
 - If two people ask questions back-to-back, you can address both in one response
-- Don't repeat someone's name if they're the only other person in the call"""
+- Don't repeat someone's name if they're the only other person in the call
+
+Action-awareness policy:
+- Listen for explicit tasks, decisions, and follow-up requests during the call.
+- Briefly acknowledge that you captured actionable work, but do not claim you completed side effects unless a tool actually ran.
+- Post-call Hermes automation will synthesize the transcript and route arbitrary authorized actions; Linear is only one possible target."""
 
 
 class FlashLLM(BaseLLM):

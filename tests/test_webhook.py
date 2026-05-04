@@ -158,6 +158,72 @@ class TestHandleTranscript:
         session = registry.get("bot-001")
         assert len(session.transcript) == 0
 
+    async def test_silence_command_switches_mode_without_queueing(self, handler, registry):
+        data = {
+            "data": {
+                "participant": {"name": "Alice"},
+                "words": [{"text": "Hank"}, {"text": "Bob"}, {"text": "quiet"}],
+                "started_at": "2025-01-01T00:00:00Z",
+            }
+        }
+        with patch.object(handler, "_ensure_worker") as ensure_worker:
+            await handler._handle_transcript("bot-001", data)
+
+        session = registry.get("bot-001")
+        assert session.response_mode == "silent_transcribe"
+        assert session.response_queue.qsize() == 0
+        assert session.mode_events[-1]["mode"] == "silent_transcribe"
+        ensure_worker.assert_not_called()
+
+    async def test_silent_mode_records_but_does_not_queue(self, handler, registry):
+        session = registry.get("bot-001")
+        session.response_mode = "silent_transcribe"
+        data = {
+            "data": {
+                "participant": {"name": "Alice"},
+                "words": [{"text": "keep"}, {"text": "transcribing"}],
+                "started_at": "2025-01-01T00:00:01Z",
+            }
+        }
+        with patch.object(handler, "_ensure_worker") as ensure_worker:
+            await handler._handle_transcript("bot-001", data)
+
+        assert len(session.transcript) == 1
+        assert session.response_queue.qsize() == 0
+        ensure_worker.assert_not_called()
+
+    async def test_wake_command_reactivates_and_queues(self, handler, registry):
+        session = registry.get("bot-001")
+        session.response_mode = "silent_transcribe"
+        data = {
+            "data": {
+                "participant": {"name": "Alice"},
+                "words": [{"text": "Hey"}, {"text": "Hank"}, {"text": "Bob"}],
+                "started_at": "2025-01-01T00:00:02Z",
+            }
+        }
+        with patch.object(handler, "_ensure_worker") as ensure_worker:
+            await handler._handle_transcript("bot-001", data)
+
+        assert session.response_mode == "active"
+        assert session.response_queue.qsize() == 1
+        ensure_worker.assert_called_once()
+
+    async def test_transcript_extracts_action_candidate(self, handler, registry):
+        data = {
+            "data": {
+                "participant": {"name": "Alice"},
+                "words": [{"text": "After"}, {"text": "this"}, {"text": "call"}, {"text": "start"}, {"text": "a"}, {"text": "Hermes"}, {"text": "session"}],
+                "started_at": "2025-01-01T00:00:03Z",
+            }
+        }
+        with patch.object(handler, "_ensure_worker"):
+            await handler._handle_transcript("bot-001", data)
+
+        session = registry.get("bot-001")
+        assert len(session.action_candidates) == 1
+        assert session.action_candidates[0].target == "hermes"
+
 
 @pytest.mark.asyncio
 class TestHandleRouting:

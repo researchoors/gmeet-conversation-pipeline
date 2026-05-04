@@ -134,7 +134,8 @@ class TestBotRegistryListBots:
         expected_keys = {
             "bot_id", "meeting_url", "status", "speaking",
             "pipeline_state", "last_llm_ms", "last_tts_ms", "last_total_ms",
-            "queue_depth", "participants",
+            "queue_depth", "participants", "response_mode",
+            "mode_event_count", "action_candidate_count",
             "last_processed_ts", "transcript_count",
             "conversation_count", "created_at",
         }

@@ -96,6 +96,15 @@ class GmeetServer:
             tts=tts,
             ws_manager=ws_manager if hasattr(tts, 'ws_manager') else None,
             audio_queue=self.audio_queue,
+            artifact_dir=str(self.settings.meeting_artifacts_dir),
+            post_call_enabled=self.settings.post_call_hermes_enabled,
+            post_call_hermes_cmd=self.settings.post_call_hermes_cmd,
+            post_call_model=self.settings.post_call_model,
+            post_call_provider=self.settings.post_call_provider,
+            post_call_toolsets=self.settings.post_call_toolsets,
+            post_call_inbox_dir=str(self.settings.action_inbox_dir),
+            post_call_max_parallel_sessions=self.settings.post_call_max_parallel_sessions,
+            post_call_dry_run=self.settings.post_call_dry_run,
         )
 
         self.app = FastAPI(title="Hank Bob Meeting Agent")
@@ -207,6 +216,8 @@ class GmeetServer:
                     "speaking": session.speaking,
                     "queue_depth": session.response_queue.qsize(),
                     "participants": list(session.participants.keys()),
+                    "response_mode": session.response_mode,
+                    "action_candidate_count": len(session.action_candidates),
                     "last_llm_ms": session.last_llm_ms,
                     "last_tts_ms": session.last_tts_ms,
                     "last_total_ms": session.last_total_ms,
