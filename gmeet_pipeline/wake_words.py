@@ -38,8 +38,15 @@ _SILENCE_PHRASES = (
     "be quiet",
     "not now",
     "stop talking",
+    "stop",
     "mute",
+    "mute yourself",
     "silence",
+    "silent",
+    "go silent",
+    "wake down",
+    "shut it",
+    "not right now",
 )
 _WAKE_PHRASES = (
     "wake up",

@@ -24,6 +24,20 @@ def test_classifies_wake_command():
     assert result.confidence >= 0.8
 
 
+def test_classifies_live_reported_silence_variants():
+    phrases = [
+        "Hank Bob wake down",
+        "Hank Bob go silent",
+        "Hank Bob stop",
+        "Hank Bob shut it",
+        "Hank Bob not right now",
+    ]
+
+    for phrase in phrases:
+        result = classify_wake_command(phrase)
+        assert result.kind == "silence", phrase
+
+
 def test_ignores_unrelated_text():
     result = classify_wake_command("we should benchmark the router after the call")
 
