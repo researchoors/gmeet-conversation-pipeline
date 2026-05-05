@@ -224,6 +224,22 @@ class TestAgentPageRoute:
         assert "Hank Bob" in response.text
 
 
+class TestSessionStateEndpoint:
+    """Test /api/session-state returns live response mode metadata."""
+
+    def test_session_state_includes_mode_event_count(self, server, client):
+        session = BotSession(bot_id="bot-1", meeting_url="https://meet.google.com/test")
+        session.response_mode = "silent_transcribe"
+        session.mode_events.append({"mode": "silent_transcribe"})
+        server.registry._bots["bot-1"] = session
+
+        response = client.get("/api/session-state")
+        assert response.status_code == 200
+        bot = response.json()["bots"][0]
+        assert bot["response_mode"] == "silent_transcribe"
+        assert bot["mode_event_count"] == 1
+
+
 class TestJoinEndpoint:
     """Test /api/bot/join creates a bot session."""
 
@@ -245,3 +261,43 @@ class TestJoinEndpoint:
     def test_join_requires_auth(self, client):
         response = client.post("/api/bot/join", json={"meeting_url": "https://meet.google.com/new"})
         assert response.status_code == 401
+
+
+class TestRecallStatusMonitor:
+    """Test server-side Recall lifecycle polling for post-call finalization."""
+
+    def test_join_starts_status_monitor_task(self, server, client):
+        with patch.object(server, "_start_status_monitor") as monitor:
+            response = client.post(
+                "/api/bot/join",
+                headers={"Authorization": "Bearer test-api-key"},
+                json={"meeting_url": "https://meet.google.com/test"},
+            )
+
+        assert response.status_code == 200
+        monitor.assert_called_once_with("stub-bot-001")
+
+    @pytest.mark.asyncio
+    async def test_monitor_finalizes_when_recall_reports_done(self, server):
+        session = await server.registry.create("bot-done", "https://meet.google.com/test")
+        statuses = iter(["in_call_recording", "done"])
+
+        async def fake_status(bot_id):
+            return next(statuses)
+
+        server.transport.get_status = fake_status
+        with patch.object(server.webhook_handler, "_finalize_call") as finalize:
+            await server._monitor_recall_status("bot-done", poll_interval=0, max_polls=3)
+
+        finalize.assert_called_once_with(session, "recall_done")
+        assert session.status == "done"
+
+    @pytest.mark.asyncio
+    async def test_monitor_ignores_non_terminal_statuses(self, server):
+        await server.registry.create("bot-active", "https://meet.google.com/test")
+        server.transport.get_status = AsyncMock(return_value="in_call_recording")
+
+        with patch.object(server.webhook_handler, "_finalize_call") as finalize:
+            await server._monitor_recall_status("bot-active", poll_interval=0, max_polls=2)
+
+        finalize.assert_not_called()
