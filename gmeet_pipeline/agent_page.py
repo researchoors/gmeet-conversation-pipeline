@@ -641,8 +641,13 @@ async function pollSessionState() {
     const bot = (data.bots || [])[0];
     if (!bot) return;
 
-    updatePipelineUI(bot.pipeline_state || 'idle');
-    updateActivationUI(bot);
+    const serverState = bot.pipeline_state || 'idle';
+    // Server marks pipeline_state='speaking' when audio is queued, but it does
+    // not know when the browser finishes local WAV playback. Avoid a stale
+    // visual "Speaking..." state after the local audio source has ended.
+    const effectiveState = (serverState === 'speaking' && !isSpeaking) ? 'idle' : serverState;
+    updatePipelineUI(effectiveState);
+    updateActivationUI({...bot, pipeline_state: effectiveState});
 
     const modeEvents = bot.mode_event_count || 0;
     if (modeEvents !== lastModeEventCount) {

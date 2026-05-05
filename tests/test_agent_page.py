@@ -56,6 +56,11 @@ class TestGetAgentHtmlLocal:
         assert "items.length < lastAudioCount" in html
         assert "lastAudioCount = 0" in html
 
+    def test_local_page_avoids_stale_speaking_state_after_audio_end(self):
+        html = get_agent_html("local")
+        assert "serverState === 'speaking' && !isSpeaking" in html
+        assert "effectiveState" in html
+
     def test_elevenlabs_page_can_receive_stop_control(self):
         html = get_agent_html("elevenlabs")
         assert "function stopAllAudio()" in html
