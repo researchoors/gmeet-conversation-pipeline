@@ -45,3 +45,36 @@ jobs:
 
       - name: Run E2E tests
         run: python -m pytest tests/e2e/ -v
+
+
+  real-hermes-post-call:
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ vars.GMEET_RUN_REAL_HERMES_E2E == '1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio httpx
+
+      - name: Install Hermes
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run real Hermes post-call smoke test
+        env:
+          GMEET_RUN_REAL_HERMES_E2E: '1'
+          GMEET_REAL_HERMES_MODEL: ${{ vars.GMEET_REAL_HERMES_MODEL }}
+          GMEET_REAL_HERMES_PROVIDER: ${{ vars.GMEET_REAL_HERMES_PROVIDER }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: python -m pytest tests/test_real_hermes_post_call.py -v
