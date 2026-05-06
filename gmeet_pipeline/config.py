@@ -56,11 +56,20 @@ class GmeetSettings(BaseSettings):
 
     # ── Backend selectors ──────────────────────────────────────────────
     tts_backend: Literal["elevenlabs", "local"] = "local"
-    llm_routing: Literal["simple", "voice_gateway", "flash"] = "flash"
+    llm_routing: Literal["simple", "voice_gateway", "flash", "local"] = "flash"
 
     # ── Auth ──────────────────────────────────────────────────────────
     api_key: str = ""  # Bearer token for admin endpoints (GMEET_API_KEY)
     webhook_secret: str = ""  # Secret embedded in webhook URL path (GMEET_WEBHOOK_SECRET)
+
+    # ── Post-call Hermes action routing ───────────────────────────────
+    post_call_hermes_enabled: bool = False
+    post_call_hermes_cmd: str = "hermes"
+    post_call_model: str = "google/gemini-2.5-flash"
+    post_call_provider: str = "openrouter"
+    post_call_toolsets: str = "terminal,file,skills,session_search"
+    post_call_max_parallel_sessions: int = 3
+    post_call_dry_run: bool = False
 
     # ── Paths ──────────────────────────────────────────────────────────
     hermes_home: str = str(Path.home() / ".hermes")
@@ -81,6 +90,16 @@ class GmeetSettings(BaseSettings):
     @property
     def user_file(self) -> Path:
         return Path(self.hermes_home) / "memories" / "USER.md"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def meeting_artifacts_dir(self) -> Path:
+        return Path(self.hermes_home) / "gmeet-artifacts"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def action_inbox_dir(self) -> Path:
+        return Path(self.hermes_home) / "data-inbox" / "gmeet"
 
     # ── Factory ────────────────────────────────────────────────────────
 

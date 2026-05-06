@@ -213,6 +213,15 @@ function stopSpeaking() {
   }
 }
 
+function stopAllAudio() {
+  pcmBuffer = new Int16Array(0);
+  isSpeaking = false;
+  statusEl.textContent = 'Muted';
+  agentEl.className = 'container';
+  responseTextEl.textContent = '';
+  debug('stop command received');
+}
+
 let ws = null;
 let wsReconnectDelay = 1000;
 const WS_MAX_DELAY = 30000;
@@ -243,6 +252,8 @@ function connectWebSocket() {
           startSpeaking(msg.text, msg.sampleRate);
         } else if (msg.type === 'end') {
           stopSpeaking();
+        } else if (msg.type === 'stop') {
+          stopAllAudio();
         } else if (msg.type === 'fallback_audio') {
           playFallbackAudio(msg.url);
         } else if (msg.type === 'pong') {
@@ -368,6 +379,19 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
   }
   .name { font-size: 18px; font-weight: 600; color: #E0E0E0; }
   .status { font-size: 13px; color: #888; margin-top: 6px; }
+  .activation-badge {
+    margin: 10px auto 0;
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    border: 1px solid #1f2937;
+  }
+  .activation-active { color: #4ADE80; background: rgba(74, 222, 128, 0.12); border-color: #166534; }
+  .activation-muted { color: #F87171; background: rgba(248, 113, 113, 0.12); border-color: #7f1d1d; }
+  .activation-processing { color: #FBBF24; background: rgba(251, 191, 36, 0.12); border-color: #92400e; }
   .status-listening { color: #4ADE80; }
   .status-llm { color: #FBBF24; }
   .status-tts { color: #F97316; }
@@ -471,6 +495,7 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
       <div class="avatar">HB</div>
       <div class="name">Hank Bob</div>
       <div class="status" id="status">Connecting...</div>
+      <div class="activation-badge activation-active" id="activationStatus">ACTIVE</div>
       <div class="response-text" id="responseText"></div>
     </div>
   </div>
@@ -513,10 +538,12 @@ const queueDepthEl = document.getElementById('queueDepth');
 const latencyInfoEl = document.getElementById('latencyInfo');
 const participantListEl = document.getElementById('participantList');
 const lastTranscriptEl = document.getElementById('lastTranscript');
+const activationStatusEl = document.getElementById('activationStatus');
 
 let isSpeaking = false;
 let currentSource = null;
 let lastAudioCount = 0;
+let lastModeEventCount = 0;
 let audioCtx = null;
 
 async function initAudio() {
@@ -537,6 +564,26 @@ async function initAudio() {
 function debug(msg) {
   console.log('[HankBob]', msg);
   fetch('/api/debug', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg})}).catch(()=>{});
+}
+
+function updateActivationUI(bot) {
+  if (!activationStatusEl || !bot) return;
+  const mode = bot.response_mode || 'active';
+  const state = bot.pipeline_state || 'idle';
+  let label = 'ACTIVE';
+  let cls = 'activation-badge activation-active';
+  if (mode === 'silent_transcribe') {
+    label = 'MUTED';
+    cls = 'activation-badge activation-muted';
+  } else if (state === 'llm' || state === 'tts' || state === 'queuing') {
+    label = 'PROCESSING';
+    cls = 'activation-badge activation-processing';
+  } else if (state === 'speaking') {
+    label = 'SPEAKING';
+    cls = 'activation-badge activation-processing';
+  }
+  activationStatusEl.textContent = label;
+  activationStatusEl.className = cls;
 }
 
 function updatePipelineUI(state) {
@@ -574,6 +621,10 @@ async function pollAudio() {
     if (!resp.ok) return;
     const data = await resp.json();
     const items = data.items || [];
+    if (items.length < lastAudioCount) {
+      // Server cleared the queue after a silence/interruption command.
+      lastAudioCount = 0;
+    }
     if (items.length > lastAudioCount) {
       const latest = items[items.length - 1];
       if (latest && latest.filename) await playAudio(latest.filename, latest.text);
@@ -590,7 +641,24 @@ async function pollSessionState() {
     const bot = (data.bots || [])[0];
     if (!bot) return;
 
-    updatePipelineUI(bot.pipeline_state || 'idle');
+    const serverState = bot.pipeline_state || 'idle';
+    // Server marks pipeline_state='speaking' when audio is queued, but it does
+    // not know when the browser finishes local WAV playback. Avoid a stale
+    // visual "Speaking..." state after the local audio source has ended.
+    const effectiveState = (serverState === 'speaking' && !isSpeaking) ? 'idle' : serverState;
+    updatePipelineUI(effectiveState);
+    updateActivationUI({...bot, pipeline_state: effectiveState});
+
+    const modeEvents = bot.mode_event_count || 0;
+    if (modeEvents !== lastModeEventCount) {
+      if (bot.response_mode === 'silent_transcribe') {
+        stopAllAudio();
+      }
+      // Mode transitions can clear/restart the server audio queue; force the
+      // next poll to consider the latest queue from scratch.
+      lastAudioCount = 0;
+    }
+    lastModeEventCount = modeEvents;
 
     const qd = bot.queue_depth || 0;
     queueDepthEl.textContent = qd + ' pending';
@@ -614,6 +682,17 @@ async function pollSessionState() {
       lastTranscriptEl.textContent = (last.speaker || '?') + ': ' + (last.text || '').slice(0, 80);
     }
   } catch (e) {}
+}
+
+function stopAllAudio() {
+  if (currentSource) {
+    try { currentSource.stop(0); } catch (e) {}
+    currentSource = null;
+  }
+  isSpeaking = false;
+  responseTextEl.textContent = '';
+  updatePipelineUI('idle');
+  debug('stop command received');
 }
 
 async function playAudio(filename, text) {

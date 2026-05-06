@@ -79,5 +79,14 @@ class RecallTransport(BaseTransport):
                 headers={"Authorization": f"Token {self.api_key}"},
             )
             if resp.status_code == 200:
-                return resp.json().get("status", {}).get("code", "unknown")
+                data = resp.json()
+                status = data.get("status")
+                if isinstance(status, dict) and status.get("code"):
+                    return status["code"]
+                status_changes = data.get("status_changes") or []
+                if status_changes:
+                    latest = status_changes[-1]
+                    if isinstance(latest, dict):
+                        return latest.get("code") or "unknown"
+                return "unknown"
         return None

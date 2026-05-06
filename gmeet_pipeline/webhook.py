@@ -9,6 +9,10 @@ from .state import BotRegistry, BotSession
 from .llm.base import BaseLLM
 from .tts.base import BaseTTS
 from .ws_manager import ConnectionManager
+from .actions import extract_action_candidates, merge_action_candidate
+from .artifacts import write_meeting_artifact
+from .post_call import spawn_post_call_sessions
+from .wake_words import classify_wake_command
 
 
 logger = logging.getLogger("gmeet_pipeline.webhook")
@@ -24,12 +28,30 @@ class RecallWebhookHandler:
         tts: BaseTTS,
         ws_manager: Optional[ConnectionManager] = None,
         audio_queue: Optional[dict] = None,
+        artifact_dir: Optional[str] = None,
+        post_call_enabled: bool = False,
+        post_call_hermes_cmd: str = "hermes",
+        post_call_model: str = "google/gemini-2.5-flash",
+        post_call_provider: str = "openrouter",
+        post_call_toolsets: str = "terminal,file,skills,session_search",
+        post_call_inbox_dir: Optional[str] = None,
+        post_call_max_parallel_sessions: int = 3,
+        post_call_dry_run: bool = False,
     ):
         self.registry = registry
         self.llm = llm
         self.tts = tts
         self.ws_manager = ws_manager
         self.audio_queue = audio_queue if audio_queue is not None else {}
+        self.artifact_dir = artifact_dir
+        self.post_call_enabled = post_call_enabled
+        self.post_call_hermes_cmd = post_call_hermes_cmd
+        self.post_call_model = post_call_model
+        self.post_call_provider = post_call_provider
+        self.post_call_toolsets = post_call_toolsets
+        self.post_call_inbox_dir = post_call_inbox_dir
+        self.post_call_max_parallel_sessions = post_call_max_parallel_sessions
+        self.post_call_dry_run = post_call_dry_run
         self._workers: dict[str, asyncio.Task] = {}  # bot_id -> queue worker task
 
     async def handle(self, body: dict) -> dict:
@@ -52,6 +74,7 @@ class RecallWebhookHandler:
                 worker = self._workers.pop(bot_id, None)
                 if worker and not worker.done():
                     worker.cancel()
+                self._finalize_call(session, "call_ended")
         elif event == "transcript.data":
             await self._handle_transcript(bot_id, data)
         elif event == "transcript.partial_data":
@@ -64,6 +87,30 @@ class RecallWebhookHandler:
             logger.info(f"Unhandled event: {event}")
 
         return {"ok": True}
+
+    def _finalize_call(self, session: BotSession, end_reason: str) -> None:
+        """Persist the meeting artifact and optionally spawn post-call Hermes."""
+
+        if not self.artifact_dir or session.post_call_finalized:
+            return
+        session.post_call_finalized = True
+        try:
+            artifact_path = write_meeting_artifact(session, self.artifact_dir, end_reason=end_reason)
+            logger.info(f"Meeting artifact written: {artifact_path}")
+            if self.post_call_enabled:
+                result = spawn_post_call_sessions(
+                    artifact_path=artifact_path,
+                    hermes_cmd=self.post_call_hermes_cmd,
+                    model=self.post_call_model,
+                    provider=self.post_call_provider,
+                    toolsets=self.post_call_toolsets,
+                    inbox_path=self.post_call_inbox_dir or self.artifact_dir,
+                    max_parallel_sessions=self.post_call_max_parallel_sessions,
+                    dry_run=self.post_call_dry_run,
+                )
+                logger.info(f"Post-call Hermes result: {result}")
+        except Exception as e:
+            logger.error(f"Post-call finalization failed: {type(e).__name__}: {e}", exc_info=True)
 
     async def _handle_status_change(self, bot_id: str, data: dict):
         status = data.get("status", {})
@@ -82,6 +129,7 @@ class RecallWebhookHandler:
                 worker = self._workers.pop(bot_id, None)
                 if worker and not worker.done():
                     worker.cancel()
+                self._finalize_call(session, "status_ended")
 
     async def _handle_transcript(self, bot_id: str, data: dict):
         transcript_data = data.get("data", {})
@@ -116,6 +164,36 @@ class RecallWebhookHandler:
         logger.info(f"[{speaker}]: {text}")
 
         session.conversation.append({"role": "user", "content": f"{speaker}: {text}"})
+
+        for candidate in extract_action_candidates(speaker=speaker, text=text, timestamp=ts):
+            session.action_candidates = merge_action_candidate(session.action_candidates, candidate)
+
+        command = classify_wake_command(text)
+        if command.kind == "silence":
+            session.response_mode = "silent_transcribe"
+            session.mode_events.append({
+                "mode": "silent_transcribe",
+                "reason": command.matched_phrase,
+                "speaker": speaker,
+                "text": text,
+                "timestamp": ts,
+            })
+            logger.info("Hank Bob entering silent_transcribe mode")
+            return
+        if command.kind == "wake":
+            session.response_mode = "active"
+            session.mode_events.append({
+                "mode": "active",
+                "reason": command.matched_phrase,
+                "speaker": speaker,
+                "text": text,
+                "timestamp": ts,
+            })
+            logger.info("Hank Bob entering active mode")
+
+        if session.response_mode == "silent_transcribe":
+            logger.info("Silent transcription mode active; skipping response queue")
+            return
 
         # Queue the message instead of fire-and-forget
         await session.response_queue.put({"speaker": speaker, "text": text, "ts": ts})

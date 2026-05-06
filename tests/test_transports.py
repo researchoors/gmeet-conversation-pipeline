@@ -1,3 +1,4 @@
+from pathlib import Path
 """Tests for gmeet_pipeline.transports."""
 
 import json
@@ -133,6 +134,36 @@ class TestRecallTransportGetStatus:
 
         assert result == "in_meeting"
 
+
+    async def test_get_status_returns_latest_status_change_when_status_field_missing(self):
+        transport = RecallTransport(
+            api_key="test-key",
+            base_url="https://us-west-2.recall.ai/api/v1",
+            service_url="https://test.example.com",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": None,
+            "status_changes": [
+                {"code": "joining_call"},
+                {"code": "in_call_recording"},
+                {"code": "done"},
+            ],
+        }
+
+        with patch("gmeet_pipeline.transports.recall.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await transport.get_status("bot-123")
+
+        assert result == "done"
+
     async def test_get_status_returns_none_on_error(self):
         transport = RecallTransport(
             api_key="test-key",
@@ -153,3 +184,16 @@ class TestRecallTransportGetStatus:
             result = await transport.get_status("bot-123")
 
         assert result is None
+
+
+def test_recall_transport_uses_only_supported_realtime_events():
+    source = Path("gmeet_pipeline/transports/recall.py").read_text()
+    assert '"transcript.data"' in source
+    assert '"transcript.partial_data"' in source
+    assert '"participant_events.join"' in source
+    assert '"participant_events.leave"' in source
+    assert '"bot.call_ended"' not in source
+    assert '"bot.status_change"' not in source
+    assert '"transcript.done"' not in source
+    assert '"realtime_endpoint.done"' not in source
+    assert '"participant_events.done"' not in source

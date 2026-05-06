@@ -89,6 +89,7 @@ class GmeetServer:
         self.registry = registry
         self.memory_snapshot = memory_snapshot
         self.audio_queue: dict = {}
+        self._status_monitors: dict[str, asyncio.Task] = {}
 
         self.webhook_handler = RecallWebhookHandler(
             registry=registry,
@@ -96,6 +97,15 @@ class GmeetServer:
             tts=tts,
             ws_manager=ws_manager if hasattr(tts, 'ws_manager') else None,
             audio_queue=self.audio_queue,
+            artifact_dir=str(self.settings.meeting_artifacts_dir),
+            post_call_enabled=self.settings.post_call_hermes_enabled,
+            post_call_hermes_cmd=self.settings.post_call_hermes_cmd,
+            post_call_model=self.settings.post_call_model,
+            post_call_provider=self.settings.post_call_provider,
+            post_call_toolsets=self.settings.post_call_toolsets,
+            post_call_inbox_dir=str(self.settings.action_inbox_dir),
+            post_call_max_parallel_sessions=self.settings.post_call_max_parallel_sessions,
+            post_call_dry_run=self.settings.post_call_dry_run,
         )
 
         self.app = FastAPI(title="Hank Bob Meeting Agent")
@@ -105,6 +115,49 @@ class GmeetServer:
             webhook_secret=self.settings.webhook_secret,
         )
         self._register_routes()
+
+    def _start_status_monitor(self, bot_id: str) -> None:
+        """Start a background Recall status poller for terminal lifecycle events."""
+        existing = self._status_monitors.get(bot_id)
+        if existing and not existing.done():
+            return
+        self._status_monitors[bot_id] = asyncio.create_task(
+            self._monitor_recall_status(bot_id),
+            name=f"recall-status-{bot_id[:8]}",
+        )
+
+    async def _monitor_recall_status(
+        self,
+        bot_id: str,
+        poll_interval: float = 5.0,
+        max_polls: Optional[int] = None,
+    ) -> None:
+        """Poll Recall for terminal status and finalize the local session once.
+
+        Recall realtime endpoints provide transcript/participant events but not
+        terminal lifecycle hooks, so post-call work must be triggered by polling
+        the bot resource after join.
+        """
+        terminal_statuses = {"call_ended", "recording_done", "done", "ended", "fatal"}
+        polls = 0
+        while max_polls is None or polls < max_polls:
+            polls += 1
+            session = self.registry.get(bot_id)
+            if not session or session.post_call_finalized:
+                return
+            try:
+                status = await self.transport.get_status(bot_id)
+            except Exception as exc:
+                logger.warning("Recall status monitor failed for %s: %s", bot_id, exc)
+                status = None
+            if status:
+                session.status = status
+                if status in terminal_statuses:
+                    logger.info("Recall status monitor terminal status for %s: %s", bot_id, status)
+                    self.webhook_handler._finalize_call(session, f"recall_{status}")
+                    return
+            if poll_interval > 0:
+                await asyncio.sleep(poll_interval)
 
     def _register_routes(self):
         app = self.app
@@ -168,6 +221,7 @@ class GmeetServer:
             bot_id = data.get("id")
 
             session = await self.registry.create(bot_id, meeting_url)
+            self._start_status_monitor(bot_id)
             logger.info(f"Bot {bot_id} created, joining {meeting_url}")
             return {"bot_id": bot_id, "status": "joining", "data": data}
 
@@ -207,6 +261,9 @@ class GmeetServer:
                     "speaking": session.speaking,
                     "queue_depth": session.response_queue.qsize(),
                     "participants": list(session.participants.keys()),
+                    "response_mode": session.response_mode,
+                    "mode_event_count": len(session.mode_events),
+                    "action_candidate_count": len(session.action_candidates),
                     "last_llm_ms": session.last_llm_ms,
                     "last_tts_ms": session.last_tts_ms,
                     "last_total_ms": session.last_total_ms,

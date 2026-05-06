@@ -37,6 +37,35 @@ class TestGetAgentHtmlLocal:
         assert "Hank Bob" in html
 
 
+    def test_local_page_can_receive_stop_control(self):
+        html = get_agent_html("local")
+        assert "function stopAllAudio()" in html
+        assert "currentSource.stop(0)" in html
+        assert "bot.response_mode === 'silent_transcribe'" in html
+        assert "mode_event_count" in html
+
+    def test_local_page_shows_activation_status(self):
+        html = get_agent_html("local")
+        assert 'id="activationStatus"' in html
+        assert "function updateActivationUI" in html
+        assert "MUTED" in html
+        assert "ACTIVE" in html
+
+    def test_local_page_resets_audio_count_after_queue_clear(self):
+        html = get_agent_html("local")
+        assert "items.length < lastAudioCount" in html
+        assert "lastAudioCount = 0" in html
+
+    def test_local_page_avoids_stale_speaking_state_after_audio_end(self):
+        html = get_agent_html("local")
+        assert "serverState === 'speaking' && !isSpeaking" in html
+        assert "effectiveState" in html
+
+    def test_elevenlabs_page_can_receive_stop_control(self):
+        html = get_agent_html("elevenlabs")
+        assert "function stopAllAudio()" in html
+        assert "msg.type === 'stop'" in html
+
 class TestAgentPageShared:
     """Test shared properties across both agent pages."""
 
