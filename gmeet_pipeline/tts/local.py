@@ -1,7 +1,5 @@
 """Local TTS backend — Kokoro text-to-speech with optional RVC voice conversion.
 
-Ported from meeting_agent_rvc.py (lines 258-348, 492-523).
-
 The heavy Kokoro KPipeline and RVC VC modules are loaded lazily on first use
 so that importing this module never crashes when the optional ML dependencies
 are not installed.
@@ -11,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import struct
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional, Union
@@ -25,7 +25,7 @@ class LocalTTS(BaseTTS):
     """Generate speech locally using Kokoro TTS and optional RVC voice
     conversion.
 
-    The Kokoro KPipeline and RVC inference modules are loaded lazily via
+    The Kokoro KPipeline and RVC VC modules are loaded lazily via
     :meth:`_ensure_init` on the first call to :meth:`generate`.  This keeps
     the import cheap when the heavy ML dependencies are not available.
     """
@@ -38,6 +38,9 @@ class LocalTTS(BaseTTS):
         rvc_f0_method: str = "rmvpe",
         rvc_f0_up_key: int = 0,
         rvc_index_rate: float = 0.0,
+        rvc_filter_radius: int = 3,
+        rvc_rms_mix_rate: float = 0.25,
+        rvc_protect: float = 0.33,
         kokoro_voice: str = "af_heart",
         audio_dir: Union[str, Path] = "",
     ) -> None:
@@ -47,16 +50,16 @@ class LocalTTS(BaseTTS):
         self.rvc_f0_method = rvc_f0_method
         self.rvc_f0_up_key = rvc_f0_up_key
         self.rvc_index_rate = rvc_index_rate
+        self.rvc_filter_radius = rvc_filter_radius
+        self.rvc_rms_mix_rate = rvc_rms_mix_rate
+        self.rvc_protect = rvc_protect
         self.kokoro_voice = kokoro_voice
         self.audio_dir = Path(audio_dir) if audio_dir else Path.home() / ".hermes" / "audio_cache" / "meeting_tts"
 
         # Lazy-loaded heavy objects (populated by _ensure_init)
         self._kokoro_pipeline = None  # kokoro.KPipeline
-        self._vc = None               # RVC VC module
-        self._tgt_sr: int = 0
-        self._net_g = None
-        self._version: str = ""
-        self._hubert_model = None
+        self._vc = None               # RVC VC class instance
+        self._rvc_loaded: bool = False
         self._initialized: bool = False
 
         # Ensure the audio directory exists
@@ -73,7 +76,6 @@ class LocalTTS(BaseTTS):
 
         # --- espeak-ng lib + data path (macOS brew) ---
         try:
-            import os
             espeak_data = "/opt/homebrew/Cellar/espeak-ng/1.52.0/share/espeak-ng-data"
             if os.path.isdir(espeak_data):
                 os.environ.setdefault("ESPEAK_DATA_PATH", espeak_data)
@@ -104,65 +106,53 @@ class LocalTTS(BaseTTS):
             if rvc_repo and rvc_repo not in sys.path:
                 sys.path.insert(0, rvc_repo)
 
-            from infer.lib.infer_pack.models import (
-                SynthesizerTrnMs256NSFsid,
-                SynthesizerTrnMs256NSFsid_nono,
-                SynthesizerTrnMs768NSFsid,
-                SynthesizerTrnMs768NSFsid_nono,
-            )
-            from infer.lib.infer_pack.models_onnx import (
-                SynthesizerTrnMsNSFsidM,
-                SynthesizerTrnMsNSFsidNonoM,
-            )
-            from infer.inference import load_hubert, vc_single  # type: ignore[import-untyped]
+            # RVC needs to run from its repo dir for configs/ and assets/
+            original_cwd = os.getcwd()
+            os.chdir(rvc_repo)
 
-            import torch  # type: ignore[import-untyped]
+            # Set env vars RVC's Config expects
+            rvc_model_dir = str(Path(self.rvc_model_path).parent)
+            os.environ.setdefault("weight_root", rvc_model_dir)
+            os.environ.setdefault("index_root", rvc_model_dir)
+            os.environ.setdefault("outside_index_root", rvc_model_dir)
+            # rmvpe_root points to the RMVPE model inside the RVC repo
+            os.environ.setdefault("rmvpe_root", os.path.join(rvc_repo, "assets", "rmvpe"))
 
-            # Load RVC model
-            cpt = torch.load(self.rvc_model_path, map_location="cpu")
-            self._version = cpt.get("version", "v1")
+            # MPS fallback for Apple Silicon
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-            # Determine model class based on version / architecture
-            if self._version == "v2":
-                if cpt.get("f0", 1) == 0:
-                    net_g_cls = SynthesizerTrnMs768NSFsid_nono
-                else:
-                    net_g_cls = SynthesizerTrnMs768NSFsid
-            else:
-                if cpt.get("f0", 1) == 0:
-                    net_g_cls = SynthesizerTrnMs256NSFsid_nono
-                else:
-                    net_g_cls = SynthesizerTrnMs256NSFsid
+            from configs.config import Config
+            from infer.modules.vc.modules import VC
 
-            net_g = net_g_cls(
-                *cpt["config"],
-                is_half=False,
-                version=self._version,
-            )
-            del net_g.enc_q  # noqa: attribute exists at runtime
+            config = Config()
+            vc = VC(config)
 
-            net_g.load_state_dict(cpt["weight"], strict=False)
-            net_g.eval()
-            for p in net_g.parameters():
-                p.requires_grad = False
+            # get_vc loads the model — expects filename relative to weight_root
+            model_filename = Path(self.rvc_model_path).name
+            vc.get_vc(model_filename, 0.5, self.rvc_protect)
 
-            self._tgt_sr = net_g.target_sr
-            self._net_g = net_g
+            self._vc = vc
+            self._rvc_loaded = True
 
-            # Load HuBERT
-            self._hubert_model = load_hubert("cpu", False)
-            self._vc = vc_single  # function reference
+            # Restore working directory — note: HuBERT and RMVPE are lazy-loaded
+            # by vc_single on first call. _apply_rvc sets cwd to the RVC repo
+            # before calling vc_single, which ensures relative paths resolve.
+            os.chdir(original_cwd)
 
             logger.info(
-                f"RVC model loaded (version={self._version}, "
-                f"tgt_sr={self._tgt_sr})"
+                f"RVC model loaded (version={vc.version}, "
+                f"tgt_sr={vc.tgt_sr}, model={model_filename})"
             )
 
         except Exception as exc:
             logger.error(f"Failed to load RVC: {exc}")
             self._vc = None
-            self._net_g = None
-            self._hubert_model = None
+            self._rvc_loaded = False
+            # Try to restore cwd even on failure
+            try:
+                os.chdir(original_cwd)
+            except Exception:
+                pass
 
         self._initialized = True
 
@@ -211,18 +201,20 @@ class LocalTTS(BaseTTS):
                 return None
 
             audio_np = np.concatenate(audio_segments)
+            sample_rate = 24000  # Kokoro outputs at 24kHz
 
             # --- Optional RVC voice conversion ---
-            if self._vc is not None and self._net_g is not None and self._hubert_model is not None:
-                audio_np = self._apply_rvc(audio_np)
+            if self._rvc_loaded and self._vc is not None:
+                audio_np, sample_rate = self._apply_rvc(audio_np, sample_rate)
 
             # --- Save WAV ---
             filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
             filepath = self.audio_dir / filename
-            self._save_wav(audio_np, filepath, sample_rate=22050)
+            self._save_wav(audio_np, filepath, sample_rate=sample_rate)
 
             logger.info(
-                f"Local TTS: {filename} ({len(audio_np)} samples) for bot {bot_id}"
+                f"Local TTS: {filename} ({len(audio_np)} samples, "
+                f"{sample_rate}Hz) for bot {bot_id}"
             )
             return filename
 
@@ -234,46 +226,83 @@ class LocalTTS(BaseTTS):
     # RVC voice conversion
     # ------------------------------------------------------------------
 
-    def _apply_rvc(self, audio_np) -> "np.ndarray":
-        """Apply RVC voice conversion to a float32 numpy audio array."""
+    def _apply_rvc(self, audio_np, input_sr: int = 24000) -> tuple:
+        """Apply RVC voice conversion to a float32 numpy audio array.
+
+        Returns (audio_float32, output_sample_rate).
+        """
         import numpy as np
-        import torch  # type: ignore[import-untyped]
 
-        # RVC expects int16 input
-        audio_int16 = np.clip(audio_np * 32767, -32768, 32767).astype(np.int16)
+        # vc_single may lazy-load HuBERT which uses relative paths —
+        # ensure cwd is the RVC repo during the call.
+        original_cwd = os.getcwd()
+        if self.rvc_repo_dir:
+            os.chdir(self.rvc_repo_dir)
 
-        # Try to load index file for feature retrieval
-        index_path = ""
+        # Write Kokoro output to a temp WAV file — vc_single expects a file path
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+
         try:
-            import glob
+            self._save_wav(audio_np, Path(tmp_path), sample_rate=input_sr)
 
-            index_files = glob.glob(f"{self.rvc_exp_dir}/*.index")
-            if index_files:
-                index_path = index_files[0]
-        except Exception:
-            pass
+            # Find index file for feature retrieval
+            index_path = ""
+            try:
+                import glob
+                index_files = glob.glob(f"{self.rvc_exp_dir}/*.index")
+                if index_files:
+                    index_path = index_files[0]
+            except Exception:
+                pass
 
-        # vc_single signature:
-        #   vc_single(sid, audio, f0_up_key, f0_method, index_path, index_rate,
-        #             tgt_sr, net_g, hubert_model, version)
-        result = self._vc(
-            0,  # sid
-            audio_int16,
-            self.rvc_f0_up_key,
-            self.rvc_f0_method,
-            index_path,
-            self.rvc_index_rate,
-            self._tgt_sr,
-            self._net_g,
-            self._hubert_model,
-            self._version,
-        )
+            # vc_single signature:
+            #   vc_single(sid, input_audio_path, f0_up_key, f0_file,
+            #             f0_method, file_index, file_index2, index_rate,
+            #             filter_radius, resample_sr, rms_mix_rate, protect)
+            result = self._vc.vc_single(
+                0,                              # sid
+                tmp_path,                       # input_audio_path
+                self.rvc_f0_up_key,             # f0_up_key
+                "",                             # f0_file
+                self.rvc_f0_method,             # f0_method
+                index_path,                     # file_index
+                index_path,                     # file_index2
+                self.rvc_index_rate,            # index_rate
+                self.rvc_filter_radius,         # filter_radius
+                0,                              # resample_sr (0 = use model's native sr)
+                self.rvc_rms_mix_rate,          # rms_mix_rate
+                self.rvc_protect,               # protect
+            )
 
-        # result is (tgt_sr, numpy_audio)
-        if isinstance(result, tuple) and len(result) == 2:
-            return result[1].astype(np.float32) / 32768.0
+            # result is (info_string, (sample_rate, numpy_audio_int16))
+            if isinstance(result, tuple) and len(result) == 2:
+                info, audio_data = result
+                if isinstance(audio_data, tuple) and len(audio_data) == 2:
+                    out_sr, audio_out = audio_data
+                    if audio_out is not None:
+                        audio_float = audio_out.flatten().astype(np.float32) / 32768.0
+                        logger.info(f"RVC: {info}")
+                        return audio_float, out_sr
 
-        return audio_np
+            logger.warning(f"RVC returned unexpected result, using Kokoro output: {result}")
+            return audio_np, input_sr
+
+        except Exception as exc:
+            logger.error(f"RVC voice conversion failed: {exc}")
+            return audio_np, input_sr
+
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            # Restore working directory
+            try:
+                os.chdir(original_cwd)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # WAV writer
@@ -281,7 +310,7 @@ class LocalTTS(BaseTTS):
 
     @staticmethod
     def _save_wav(
-        audio_np, filepath: Path, sample_rate: int = 22050
+        audio_np, filepath: Path, sample_rate: int = 24000
     ) -> None:
         """Write a float32 numpy array as a 16-bit PCM WAV file."""
         import numpy as np

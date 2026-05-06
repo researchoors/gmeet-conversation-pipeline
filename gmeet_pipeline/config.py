@@ -45,7 +45,10 @@ class GmeetSettings(BaseSettings):
     rvc_repo_dir: str = ""
     rvc_f0_method: str = "rmvpe"
     rvc_f0_up_key: int = 0
-    rvc_index_rate: float = 0.0
+    rvc_index_rate: float = 0.75
+    rvc_filter_radius: int = 3
+    rvc_rms_mix_rate: float = 0.25
+    rvc_protect: float = 0.33
 
     # ── Kokoro TTS ─────────────────────────────────────────────────────
     kokoro_voice: str = "af_heart"
