@@ -115,6 +115,9 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
             rvc_f0_method=settings.rvc_f0_method,
             rvc_f0_up_key=settings.rvc_f0_up_key,
             rvc_index_rate=settings.rvc_index_rate,
+            rvc_filter_radius=settings.rvc_filter_radius,
+            rvc_rms_mix_rate=settings.rvc_rms_mix_rate,
+            rvc_protect=settings.rvc_protect,
             kokoro_voice=settings.kokoro_voice,
             audio_dir=settings.audio_dir,
         )

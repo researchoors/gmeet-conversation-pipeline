@@ -361,21 +361,17 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
     text-align: center;
     transition: all 0.3s;
   }
-  .avatar {
-    width: 80px; height: 80px;
-    background: #1a1a2e;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
+  .avatar-canvas {
+    width: 240px; height: 280px;
     margin: 0 auto 12px;
-    font-size: 28px; font-weight: 700;
-    color: #95BFFF;
+    border-radius: 16px;
+    background: #1a1a2e;
     border: 3px solid #2a2a4e;
-    transition: all 0.3s;
+    transition: border-color 0.3s, box-shadow 0.3s;
   }
-  .speaking .avatar {
+  .speaking .avatar-canvas {
     border-color: #95BFFF;
     box-shadow: 0 0 30px rgba(149, 191, 255, 0.5);
-    animation: glow 1s infinite;
   }
   .name { font-size: 18px; font-weight: 600; color: #E0E0E0; }
   .status { font-size: 13px; color: #888; margin-top: 6px; }
@@ -492,7 +488,7 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
 <div class="main">
   <div class="center">
     <div class="container" id="agent">
-      <div class="avatar">HB</div>
+      <canvas class="avatar-canvas" id="avatarCanvas" width="480" height="560"></canvas>
       <div class="name">Hank Bob</div>
       <div class="status" id="status">Connecting...</div>
       <div class="activation-badge activation-active" id="activationStatus">ACTIVE</div>
@@ -531,6 +527,164 @@ _LOCAL_AGENT_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+// ── Hank Hill Puppet Renderer ──────────────────────────────────────────
+const puppetCanvas = document.getElementById('avatarCanvas');
+const pCtx = puppetCanvas.getContext('2d');
+let mouthOpenness = 0;
+let targetMouth = 0;
+let blinkTimer = 0;
+let isBlinking = false;
+let breathOffset = 0;
+let lastAmplitude = 0;
+let analyserNode = null;
+
+function drawHank(mouth) {
+  const W = 480, H = 560;
+  const cx = W / 2;
+  pCtx.clearRect(0, 0, W, H);
+  pCtx.fillStyle = '#1a1a2e';
+  pCtx.fillRect(0, 0, W, H);
+  const by = breathOffset;
+
+  // Neck
+  pCtx.fillStyle = '#e8c49a';
+  pCtx.fillRect(cx - 40, 310 + by, 80, 60);
+
+  // White shirt / collar
+  pCtx.fillStyle = '#f0f0f0';
+  pCtx.beginPath();
+  pCtx.moveTo(cx - 90, 370 + by);
+  pCtx.lineTo(cx - 40, 330 + by);
+  pCtx.lineTo(cx, 350 + by);
+  pCtx.lineTo(cx + 40, 330 + by);
+  pCtx.lineTo(cx + 90, 370 + by);
+  pCtx.lineTo(cx + 90, H);
+  pCtx.lineTo(cx - 90, H);
+  pCtx.closePath();
+  pCtx.fill();
+  pCtx.strokeStyle = '#d0d0d0';
+  pCtx.lineWidth = 2;
+  pCtx.beginPath();
+  pCtx.moveTo(cx - 40, 330 + by);
+  pCtx.lineTo(cx, 360 + by);
+  pCtx.lineTo(cx + 40, 330 + by);
+  pCtx.stroke();
+
+  // Head
+  pCtx.fillStyle = '#e8c49a';
+  pCtx.beginPath();
+  pCtx.moveTo(cx - 75, 190 + by);
+  pCtx.quadraticCurveTo(cx - 85, 250 + by, cx - 70, 310 + by);
+  pCtx.quadraticCurveTo(cx, 340 + by, cx + 70, 310 + by);
+  pCtx.quadraticCurveTo(cx + 85, 250 + by, cx + 75, 190 + by);
+  pCtx.quadraticCurveTo(cx, 170 + by, cx - 75, 190 + by);
+  pCtx.fill();
+
+  // Hair — short brown, receding
+  pCtx.fillStyle = '#5a3a1a';
+  pCtx.beginPath();
+  pCtx.moveTo(cx - 72, 200 + by);
+  pCtx.quadraticCurveTo(cx - 78, 170 + by, cx - 50, 158 + by);
+  pCtx.quadraticCurveTo(cx - 20, 150 + by, cx, 155 + by);
+  pCtx.quadraticCurveTo(cx + 20, 150 + by, cx + 50, 158 + by);
+  pCtx.quadraticCurveTo(cx + 78, 170 + by, cx + 72, 200 + by);
+  pCtx.quadraticCurveTo(cx + 50, 185 + by, cx, 182 + by);
+  pCtx.quadraticCurveTo(cx - 50, 185 + by, cx - 72, 200 + by);
+  pCtx.fill();
+
+  // Ears
+  pCtx.fillStyle = '#daa878';
+  pCtx.beginPath(); pCtx.ellipse(cx - 78, 245 + by, 12, 20, 0, 0, Math.PI * 2); pCtx.fill();
+  pCtx.beginPath(); pCtx.ellipse(cx + 78, 245 + by, 12, 20, 0, 0, Math.PI * 2); pCtx.fill();
+
+  // Eyebrows
+  pCtx.strokeStyle = '#4a2a0a'; pCtx.lineWidth = 4; pCtx.lineCap = 'round';
+  pCtx.beginPath(); pCtx.moveTo(cx - 50, 212 + by); pCtx.quadraticCurveTo(cx - 35, 205 + by, cx - 18, 210 + by); pCtx.stroke();
+  pCtx.beginPath(); pCtx.moveTo(cx + 18, 210 + by); pCtx.quadraticCurveTo(cx + 35, 205 + by, cx + 50, 212 + by); pCtx.stroke();
+
+  // Eyes
+  const eyeY = 230 + by;
+  const eyeH = isBlinking ? 2 : 12;
+  pCtx.fillStyle = '#fff';
+  pCtx.beginPath(); pCtx.ellipse(cx - 34, eyeY, 16, eyeH, 0, 0, Math.PI * 2); pCtx.fill();
+  pCtx.beginPath(); pCtx.ellipse(cx + 34, eyeY, 16, eyeH, 0, 0, Math.PI * 2); pCtx.fill();
+  if (!isBlinking) {
+    pCtx.fillStyle = '#2a1a0a';
+    pCtx.beginPath(); pCtx.arc(cx - 34, eyeY + 1, 6, 0, Math.PI * 2); pCtx.fill();
+    pCtx.beginPath(); pCtx.arc(cx + 34, eyeY + 1, 6, 0, Math.PI * 2); pCtx.fill();
+    pCtx.fillStyle = '#fff';
+    pCtx.beginPath(); pCtx.arc(cx - 31, eyeY - 2, 2, 0, Math.PI * 2); pCtx.fill();
+    pCtx.beginPath(); pCtx.arc(cx + 37, eyeY - 2, 2, 0, Math.PI * 2); pCtx.fill();
+  }
+
+  // Glasses
+  pCtx.strokeStyle = '#333'; pCtx.lineWidth = 3;
+  pCtx.beginPath(); pCtx.ellipse(cx - 34, 230 + by, 24, 18, 0, 0, Math.PI * 2); pCtx.stroke();
+  pCtx.beginPath(); pCtx.ellipse(cx + 34, 230 + by, 24, 18, 0, 0, Math.PI * 2); pCtx.stroke();
+  pCtx.beginPath(); pCtx.moveTo(cx - 10, 230 + by); pCtx.quadraticCurveTo(cx, 225 + by, cx + 10, 230 + by); pCtx.stroke();
+  pCtx.beginPath(); pCtx.moveTo(cx - 58, 228 + by); pCtx.lineTo(cx - 76, 232 + by); pCtx.stroke();
+  pCtx.beginPath(); pCtx.moveTo(cx + 58, 228 + by); pCtx.lineTo(cx + 76, 232 + by); pCtx.stroke();
+
+  // Nose
+  pCtx.fillStyle = '#d4a070';
+  pCtx.beginPath();
+  pCtx.moveTo(cx, 248 + by);
+  pCtx.quadraticCurveTo(cx - 8, 270 + by, cx - 10, 275 + by);
+  pCtx.lineTo(cx + 10, 275 + by);
+  pCtx.quadraticCurveTo(cx + 8, 270 + by, cx, 248 + by);
+  pCtx.fill();
+
+  // Mouth
+  const mouthY = 292 + by;
+  const mouthW = 35;
+  const mouthH = 6 + mouth * 18;
+  if (mouth < 0.05) {
+    pCtx.strokeStyle = '#c47060'; pCtx.lineWidth = 3;
+    pCtx.beginPath();
+    pCtx.moveTo(cx - mouthW, mouthY);
+    pCtx.quadraticCurveTo(cx, mouthY + 4, cx + mouthW, mouthY);
+    pCtx.stroke();
+  } else {
+    pCtx.fillStyle = '#4a1a1a';
+    pCtx.beginPath(); pCtx.ellipse(cx, mouthY + mouthH / 2, mouthW, mouthH / 2, 0, 0, Math.PI * 2); pCtx.fill();
+    pCtx.strokeStyle = '#c47060'; pCtx.lineWidth = 2.5;
+    pCtx.beginPath(); pCtx.ellipse(cx, mouthY + mouthH / 2, mouthW, mouthH / 2, 0, 0, Math.PI * 2); pCtx.stroke();
+    if (mouth > 0.3) {
+      pCtx.fillStyle = '#f8f8f0';
+      pCtx.beginPath(); pCtx.ellipse(cx, mouthY + mouthH * 0.25, mouthW * 0.7, mouthH * 0.15, 0, 0, Math.PI); pCtx.fill();
+    }
+  }
+
+  // Jaw shadow when speaking
+  if (mouth > 0.1) {
+    pCtx.fillStyle = 'rgba(0,0,0,0.05)';
+    pCtx.beginPath(); pCtx.ellipse(cx, 310 + by, 55, 15, 0, 0, Math.PI * 2); pCtx.fill();
+  }
+}
+
+function puppetLoop(ts) {
+  breathOffset = Math.sin(ts / 1500) * 2;
+  blinkTimer -= 16;
+  if (blinkTimer <= 0 && !isBlinking) { isBlinking = true; blinkTimer = 150; }
+  else if (blinkTimer <= 0 && isBlinking) { isBlinking = false; blinkTimer = 3000 + Math.random() * 2000; }
+  mouthOpenness += (targetMouth - mouthOpenness) * 0.3;
+  if (Math.abs(mouthOpenness - targetMouth) < 0.01) mouthOpenness = targetMouth;
+  if (analyserNode && isSpeaking) {
+    const data = new Uint8Array(analyserNode.fftSize);
+    analyserNode.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / data.length);
+    lastAmplitude = rms;
+    targetMouth = Math.min(1, rms * 8);
+  } else if (!isSpeaking) { targetMouth = 0; }
+  drawHank(mouthOpenness);
+  requestAnimationFrame(puppetLoop);
+}
+requestAnimationFrame(puppetLoop);
+
+// ── Pipeline code ──────────────────────────────────────────────────────
+
 const agentEl = document.getElementById('agent');
 const statusEl = document.getElementById('status');
 const responseTextEl = document.getElementById('responseText');
@@ -712,7 +866,14 @@ async function playAudio(filename, text) {
 
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
+
+    // Connect source → analyser → destination for lip-sync
+    if (!analyserNode) {
+      analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 256;
+    }
+    source.connect(analyserNode);
+    analyserNode.connect(audioCtx.destination);
     currentSource = source;
 
     source.onended = () => {
