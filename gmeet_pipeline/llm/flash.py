@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import httpx
@@ -54,7 +55,11 @@ Action-awareness policy:
 
 
 class FlashLLM(BaseLLM):
-    """Single-model Gemini Flash with front-loaded Hermes context."""
+    """Single-model LLM with front-loaded Hermes context.
+
+    Works with OpenRouter (flash mode) or any local OpenAI-compatible
+    server (MLX, Ollama, LM Studio) when base_url is set.
+    """
 
     def __init__(
         self,
@@ -62,11 +67,15 @@ class FlashLLM(BaseLLM):
         model: str = "google/gemini-2.5-flash",
         service_url: str = "https://meet.model-optimizors.com",
         context_builder: ContextBuilder | None = None,
+        base_url: str = "",
+        no_think: bool = False,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.service_url = service_url
         self.context_builder = context_builder or ContextBuilder()
+        self.base_url = base_url or os.environ.get("GMEET_LLM_BASE_URL", "https://openrouter.ai/api/v1")
+        self.no_think = no_think or os.environ.get("GMEET_LLM_NO_THINK", "").lower() in ("1", "true", "yes")
 
     async def generate(
         self,
@@ -89,20 +98,26 @@ class FlashLLM(BaseLLM):
         # Recent conversation context (last 20 turns)
         for msg in conversation[-20:]:
             messages.append(msg)
-        # The new user message
-        messages.append({"role": "user", "content": message})
+        # The new user message — prepend /no_think for Qwen3 thinking models
+        no_think_prefix = "/no_think\n" if self.no_think else ""
+        messages.append({"role": "user", "content": f"{no_think_prefix}{message}"})
 
         try:
             t0 = asyncio.get_event_loop().time()
 
+            # Use configured base_url (local server or OpenRouter)
+            base_url = self.base_url
+            api_key = os.environ.get("GMEET_LLM_API_KEY", self.api_key)
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            if base_url.startswith("https://openrouter.ai"):
+                headers["HTTP-Referer"] = self.service_url
+
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": self.service_url,
-                    },
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    headers=headers,
                     json={
                         "model": self.model,
                         "messages": messages,

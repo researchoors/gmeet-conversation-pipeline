@@ -276,3 +276,313 @@ def test_flash_llm_no_classify_method(flash_llm):
     # These are VoiceGatewayLLM concerns
     assert not hasattr(flash_llm, "classify_query")
     assert not hasattr(flash_llm, "rag_retrieve")
+
+
+# ── FlashLLM local mode (base_url + no_think) ────────────────────────
+
+
+@pytest.fixture
+def local_flash_llm(mock_context_dir):
+    """FlashLLM configured for local OpenAI-compatible server."""
+    mem_dir, sess_dir = mock_context_dir
+    builder = ContextBuilder(memories_dir=mem_dir, sessions_dir=sess_dir)
+    return FlashLLM(
+        api_key="local-key",
+        model="mlx-community/gemma-3-4b-it-4bit",
+        service_url="https://test.example.com",
+        context_builder=builder,
+        base_url="http://localhost:8080/v1",
+        no_think=True,
+    )
+
+
+@pytest.fixture
+def local_flash_llm_no_think_false(mock_context_dir):
+    """FlashLLM configured for local server without no_think."""
+    mem_dir, sess_dir = mock_context_dir
+    builder = ContextBuilder(memories_dir=mem_dir, sessions_dir=sess_dir)
+    return FlashLLM(
+        api_key="local-key",
+        model="mlx-community/gemma-3-4b-it-4bit",
+        service_url="https://test.example.com",
+        context_builder=builder,
+        base_url="http://localhost:8080/v1",
+        no_think=False,
+    )
+
+
+class TestFlashLLMLocalMode:
+    """Test FlashLLM with custom base_url (local OpenAI-compatible server)."""
+
+    def test_custom_base_url_constructor(self, local_flash_llm):
+        """FlashLLM with custom base_url stores it correctly."""
+        assert local_flash_llm.base_url == "http://localhost:8080/v1"
+
+    def test_no_think_constructor(self, local_flash_llm):
+        """FlashLLM with no_think=True stores it correctly."""
+        assert local_flash_llm.no_think is True
+
+    def test_no_think_false_constructor(self, local_flash_llm_no_think_false):
+        """FlashLLM with no_think=False stores it correctly."""
+        assert local_flash_llm_no_think_false.no_think is False
+
+    def test_default_base_url_is_openrouter(self, flash_llm):
+        """FlashLLM without base_url defaults to OpenRouter."""
+        assert flash_llm.base_url == "https://openrouter.ai/api/v1"
+
+    @pytest.mark.asyncio
+    async def test_local_mode_hits_base_url(self, local_flash_llm):
+        """Local mode should hit base_url/chat/completions, not OpenRouter."""
+        captured_url = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_url
+            captured_url = url
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await local_flash_llm.generate(conversation=[], message="test")
+
+        assert captured_url is not None
+        assert "localhost:8080" in captured_url
+        assert "openrouter.ai" not in captured_url
+
+    @pytest.mark.asyncio
+    async def test_local_mode_omits_referer_header(self, local_flash_llm):
+        """Local mode should NOT include HTTP-Referer header."""
+        captured_headers = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_headers
+            captured_headers = kwargs.get("headers", {})
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await local_flash_llm.generate(conversation=[], message="test")
+
+        assert "HTTP-Referer" not in captured_headers
+
+    @pytest.mark.asyncio
+    async def test_openrouter_mode_includes_referer_header(self, flash_llm):
+        """OpenRouter mode should include HTTP-Referer header."""
+        captured_headers = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_headers
+            captured_headers = kwargs.get("headers", {})
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await flash_llm.generate(conversation=[], message="test")
+
+        assert "HTTP-Referer" in captured_headers
+
+    @pytest.mark.asyncio
+    async def test_no_think_true_prepends_prefix(self, local_flash_llm):
+        """no_think=True should prepend /no_think\\n to user message."""
+        captured_messages = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_messages
+            captured_messages = kwargs.get("json", {}).get("messages", [])
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await local_flash_llm.generate(conversation=[], message="test question")
+
+        # Last message is the user message
+        user_msg = captured_messages[-1]
+        assert user_msg["role"] == "user"
+        assert user_msg["content"].startswith("/no_think\n")
+        assert "test question" in user_msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_no_think_false_no_prefix(self, local_flash_llm_no_think_false):
+        """no_think=False should NOT prepend /no_think to user message."""
+        captured_messages = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_messages
+            captured_messages = kwargs.get("json", {}).get("messages", [])
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await local_flash_llm_no_think_false.generate(
+                conversation=[], message="test question"
+            )
+
+        user_msg = captured_messages[-1]
+        assert user_msg["role"] == "user"
+        assert not user_msg["content"].startswith("/no_think\n")
+
+    @pytest.mark.asyncio
+    async def test_local_mode_url_format(self, local_flash_llm):
+        """Local mode URL should be base_url/chat/completions."""
+        captured_url = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_url
+            captured_url = url
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await local_flash_llm.generate(conversation=[], message="test")
+
+        assert captured_url == "http://localhost:8080/v1/chat/completions"
+
+    @pytest.mark.asyncio
+    async def test_local_mode_trailing_slash_handling(self, mock_context_dir):
+        """Trailing slash on base_url should be stripped."""
+        mem_dir, sess_dir = mock_context_dir
+        builder = ContextBuilder(memories_dir=mem_dir, sessions_dir=sess_dir)
+        llm = FlashLLM(
+            api_key="local-key",
+            model="test-model",
+            base_url="http://localhost:8080/v1/",
+            context_builder=builder,
+        )
+
+        captured_url = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_url
+            captured_url = url
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await llm.generate(conversation=[], message="test")
+
+        # Should not have double slashes
+        assert "//chat" not in captured_url
+        assert captured_url == "http://localhost:8080/v1/chat/completions"
+
+    @pytest.mark.asyncio
+    async def test_local_mode_includes_auth_header(self, local_flash_llm):
+        """Local mode should include Authorization header with api_key."""
+        captured_headers = None
+
+        async def capture_post(url, **kwargs):
+            nonlocal captured_headers
+            captured_headers = kwargs.get("headers", {})
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = capture_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gmeet_pipeline.llm.flash.httpx.AsyncClient", return_value=mock_client):
+            await local_flash_llm.generate(conversation=[], message="test")
+
+        assert "Authorization" in captured_headers
+        assert captured_headers["Authorization"] == "Bearer local-key"
+
+    @pytest.mark.asyncio
+    async def test_env_var_base_url_override(self, mock_context_dir, monkeypatch):
+        """GMEET_LLM_BASE_URL env var should be used as base_url fallback."""
+        monkeypatch.setenv("GMEET_LLM_BASE_URL", "http://custom:9999/v1")
+        mem_dir, sess_dir = mock_context_dir
+        builder = ContextBuilder(memories_dir=mem_dir, sessions_dir=sess_dir)
+        llm = FlashLLM(
+            api_key="test",
+            model="test-model",
+            context_builder=builder,
+            # base_url not set explicitly — should fall back to env var
+        )
+        assert llm.base_url == "http://custom:9999/v1"
+
+    @pytest.mark.asyncio
+    async def test_env_var_no_think_override(self, mock_context_dir, monkeypatch):
+        """GMEET_LLM_NO_THINK env var should set no_think."""
+        monkeypatch.setenv("GMEET_LLM_NO_THINK", "true")
+        mem_dir, sess_dir = mock_context_dir
+        builder = ContextBuilder(memories_dir=mem_dir, sessions_dir=sess_dir)
+        llm = FlashLLM(
+            api_key="test",
+            model="test-model",
+            context_builder=builder,
+        )
+        assert llm.no_think is True
