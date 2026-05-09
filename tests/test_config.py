@@ -29,10 +29,13 @@ class TestGmeetSettingsDefaults:
     def test_llm_defaults(self):
         s = GmeetSettings()
         assert s.openrouter_key == ""
-        assert s.llm_model == "anthropic/claude-sonnet-4"
+        assert s.llm_model == "mlx-community/gemma-3-4b-it-4bit"
         assert s.fast_model == "google/gemini-2.5-flash"
         assert s.standard_model == "openai/gpt-4.1-mini"
         assert s.deep_model == "anthropic/claude-sonnet-4"
+        assert s.llm_base_url == "http://localhost:8080/v1"
+        assert s.llm_api_key == "unused"
+        assert s.llm_no_think is False
 
     def test_elevenlabs_defaults(self):
         s = GmeetSettings()
@@ -47,7 +50,7 @@ class TestGmeetSettingsDefaults:
         assert s.rvc_repo_dir == ""
         assert s.rvc_f0_method == "rmvpe"
         assert s.rvc_f0_up_key == 0
-        assert s.rvc_index_rate == 0.0
+        assert s.rvc_index_rate == 0.75
 
     def test_kokoro_default(self):
         s = GmeetSettings()
@@ -61,7 +64,7 @@ class TestGmeetSettingsDefaults:
     def test_backend_selector_defaults(self):
         s = GmeetSettings()
         assert s.tts_backend == "local"
-        assert s.llm_routing == "flash"
+        assert s.llm_routing == "local"
 
     def test_hermes_home_default(self):
         s = GmeetSettings()
@@ -113,6 +116,41 @@ class TestEnvVarOverride:
         monkeypatch.setenv("GMEET_HERMES_HOME", "/custom/path")
         s = GmeetSettings()
         assert s.hermes_home == "/custom/path"
+
+    def test_llm_base_url_override(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_BASE_URL", "http://myserver:1234/v1")
+        s = GmeetSettings()
+        assert s.llm_base_url == "http://myserver:1234/v1"
+
+    def test_llm_api_key_override(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_API_KEY", "sk-custom-local-key")
+        s = GmeetSettings()
+        assert s.llm_api_key == "sk-custom-local-key"
+
+    def test_llm_no_think_override_true(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_NO_THINK", "true")
+        s = GmeetSettings()
+        assert s.llm_no_think is True
+
+    def test_llm_no_think_override_false(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_NO_THINK", "false")
+        s = GmeetSettings()
+        assert s.llm_no_think is False
+
+    def test_llm_no_think_override_yes(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_NO_THINK", "yes")
+        s = GmeetSettings()
+        assert s.llm_no_think is True
+
+    def test_llm_no_think_override_1(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_NO_THINK", "1")
+        s = GmeetSettings()
+        assert s.llm_no_think is True
+
+    def test_llm_routing_override(self, monkeypatch):
+        monkeypatch.setenv("GMEET_LLM_ROUTING", "flash")
+        s = GmeetSettings()
+        assert s.llm_routing == "flash"
 
 
 class TestLoad:

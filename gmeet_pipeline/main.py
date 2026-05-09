@@ -67,7 +67,27 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
         logger.info(f"Memory: {len(memory_snapshot.entries)} entries loaded")
 
     # LLM
-    if settings.llm_routing == "flash":
+    if settings.llm_routing == "local":
+        from .context_builder import ContextBuilder
+        from .llm.flash import FlashLLM
+        context_builder = ContextBuilder(
+            memories_dir=Path(settings.hermes_home) / "memories",
+            sessions_dir=Path(settings.hermes_home) / "sessions",
+        )
+        context = context_builder.build()
+        llm = FlashLLM(
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            service_url=settings.service_url,
+            context_builder=context_builder,
+            base_url=settings.llm_base_url,
+            no_think=settings.llm_no_think,
+        )
+        logger.info(
+            f"LLM: {settings.llm_model} (local mode, base_url={settings.llm_base_url}, "
+            f"{len(context)} chars context)"
+        )
+    elif settings.llm_routing == "flash":
         from .context_builder import ContextBuilder
         from .llm.flash import FlashLLM
         context_builder = ContextBuilder(
@@ -115,10 +135,15 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
             rvc_f0_method=settings.rvc_f0_method,
             rvc_f0_up_key=settings.rvc_f0_up_key,
             rvc_index_rate=settings.rvc_index_rate,
+            rvc_filter_radius=settings.rvc_filter_radius,
+            rvc_rms_mix_rate=settings.rvc_rms_mix_rate,
+            rvc_protect=settings.rvc_protect,
+            rvc_enabled=settings.rvc_enabled,
             kokoro_voice=settings.kokoro_voice,
             audio_dir=settings.audio_dir,
         )
-        logger.info("TTS: Local Kokoro+RVC")
+        label = "Kokoro+RVC" if settings.rvc_enabled else "Kokoro (no RVC)"
+        logger.info(f"TTS: Local {label}")
     else:
         from .tts.elevenlabs import ElevenLabsTTS
         tts = ElevenLabsTTS(
@@ -156,8 +181,8 @@ def main():
     if not settings.recall_api_key:
         print("ERROR: RECALL_API_KEY not found")
         sys.exit(1)
-    if not settings.openrouter_key:
-        print("ERROR: OPENROUTER_API_KEY not found")
+    if settings.llm_routing != "local" and not settings.openrouter_key:
+        print("ERROR: OPENROUTER_API_KEY not found (required unless llm_routing=local)")
         sys.exit(1)
     if settings.tts_backend == "elevenlabs" and not settings.elevenlabs_key:
         print("ERROR: ELEVENLABS_API_KEY not found")

@@ -120,11 +120,11 @@ class RecallWebhookHandler:
         session = self.registry.get(bot_id)
         if session:
             session.status = new_status
-            if new_status == "in_meeting":
+            if new_status in ("in_meeting", "in_call_recording", "in_call_not_recording"):
                 logger.info(f"Bot {bot_id} joined meeting!")
                 # Start the queue worker when bot enters meeting
                 self._ensure_worker(bot_id)
-            elif new_status == "ended":
+            elif new_status in ("ended", "call_ended", "done", "fatal"):
                 logger.info(f"Bot {bot_id} left meeting")
                 worker = self._workers.pop(bot_id, None)
                 if worker and not worker.done():

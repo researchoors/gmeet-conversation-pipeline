@@ -29,10 +29,15 @@ class GmeetSettings(BaseSettings):
 
     # ── OpenRouter / LLM ───────────────────────────────────────────────
     openrouter_key: str = ""
-    llm_model: str = "anthropic/claude-sonnet-4"
+    llm_model: str = "mlx-community/gemma-3-4b-it-4bit"
     fast_model: str = "google/gemini-2.5-flash"
     standard_model: str = "openai/gpt-4.1-mini"
     deep_model: str = "anthropic/claude-sonnet-4"
+
+    # ── Local LLM (OpenAI-compatible server) ────────────────────────────
+    llm_base_url: str = "http://localhost:8080/v1"
+    llm_api_key: str = "unused"
+    llm_no_think: bool = False
 
     # ── ElevenLabs TTS ─────────────────────────────────────────────────
     elevenlabs_key: str = ""
@@ -45,7 +50,11 @@ class GmeetSettings(BaseSettings):
     rvc_repo_dir: str = ""
     rvc_f0_method: str = "rmvpe"
     rvc_f0_up_key: int = 0
-    rvc_index_rate: float = 0.0
+    rvc_index_rate: float = 0.75
+    rvc_filter_radius: int = 3
+    rvc_rms_mix_rate: float = 0.25
+    rvc_protect: float = 0.33
+    rvc_enabled: bool = True  # Set GMEET_RVC_ENABLED=false to skip RVC (Kokoro only)
 
     # ── Kokoro TTS ─────────────────────────────────────────────────────
     kokoro_voice: str = "af_heart"
@@ -56,7 +65,7 @@ class GmeetSettings(BaseSettings):
 
     # ── Backend selectors ──────────────────────────────────────────────
     tts_backend: Literal["elevenlabs", "local"] = "local"
-    llm_routing: Literal["simple", "voice_gateway", "flash", "local"] = "flash"
+    llm_routing: Literal["simple", "voice_gateway", "flash", "local"] = "local"
 
     # ── Auth ──────────────────────────────────────────────────────────
     api_key: str = ""  # Bearer token for admin endpoints (GMEET_API_KEY)
