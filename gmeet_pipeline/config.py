@@ -54,6 +54,7 @@ class GmeetSettings(BaseSettings):
     rvc_filter_radius: int = 3
     rvc_rms_mix_rate: float = 0.25
     rvc_protect: float = 0.33
+    rvc_enabled: bool = True  # Set GMEET_RVC_ENABLED=false to skip RVC (Kokoro only)
 
     # ── Kokoro TTS ─────────────────────────────────────────────────────
     kokoro_voice: str = "af_heart"

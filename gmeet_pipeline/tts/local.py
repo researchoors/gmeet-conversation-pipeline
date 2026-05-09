@@ -41,6 +41,7 @@ class LocalTTS(BaseTTS):
         rvc_filter_radius: int = 3,
         rvc_rms_mix_rate: float = 0.25,
         rvc_protect: float = 0.33,
+        rvc_enabled: bool = True,
         kokoro_voice: str = "af_heart",
         audio_dir: Union[str, Path] = "",
     ) -> None:
@@ -53,6 +54,7 @@ class LocalTTS(BaseTTS):
         self.rvc_filter_radius = rvc_filter_radius
         self.rvc_rms_mix_rate = rvc_rms_mix_rate
         self.rvc_protect = rvc_protect
+        self._rvc_enabled = rvc_enabled
         self.kokoro_voice = kokoro_voice
         self.audio_dir = Path(audio_dir) if audio_dir else Path.home() / ".hermes" / "audio_cache" / "meeting_tts"
 
@@ -99,60 +101,61 @@ class LocalTTS(BaseTTS):
             self._kokoro_pipeline = None
 
         # --- RVC ---
-        try:
-            import sys
-
-            rvc_repo = self.rvc_repo_dir
-            if rvc_repo and rvc_repo not in sys.path:
-                sys.path.insert(0, rvc_repo)
-
-            # RVC needs to run from its repo dir for configs/ and assets/
-            original_cwd = os.getcwd()
-            os.chdir(rvc_repo)
-
-            # Set env vars RVC's Config expects
-            rvc_model_dir = str(Path(self.rvc_model_path).parent)
-            os.environ.setdefault("weight_root", rvc_model_dir)
-            os.environ.setdefault("index_root", rvc_model_dir)
-            os.environ.setdefault("outside_index_root", rvc_model_dir)
-            # rmvpe_root points to the RMVPE model inside the RVC repo
-            os.environ.setdefault("rmvpe_root", os.path.join(rvc_repo, "assets", "rmvpe"))
-
-            # MPS fallback for Apple Silicon
-            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-
-            from configs.config import Config
-            from infer.modules.vc.modules import VC
-
-            config = Config()
-            vc = VC(config)
-
-            # get_vc loads the model — expects filename relative to weight_root
-            model_filename = Path(self.rvc_model_path).name
-            vc.get_vc(model_filename, 0.5, self.rvc_protect)
-
-            self._vc = vc
-            self._rvc_loaded = True
-
-            # Restore working directory — note: HuBERT and RMVPE are lazy-loaded
-            # by vc_single on first call. _apply_rvc sets cwd to the RVC repo
-            # before calling vc_single, which ensures relative paths resolve.
-            os.chdir(original_cwd)
-
-            logger.info(
-                f"RVC model loaded (version={vc.version}, "
-                f"tgt_sr={vc.tgt_sr}, model={model_filename})"
-            )
-
-        except Exception as exc:
-            logger.error(f"Failed to load RVC: {exc}")
-            self._vc = None
-            self._rvc_loaded = False
-            # Try to restore cwd even on failure
+        if not self._rvc_enabled:
+            logger.info("RVC disabled (GMEET_RVC_ENABLED=false), using Kokoro output directly")
+        else:
             try:
+                import sys
+
+                rvc_repo = self.rvc_repo_dir
+                if rvc_repo and rvc_repo not in sys.path:
+                    sys.path.insert(0, rvc_repo)
+
+                # RVC needs to run from its repo dir for configs/ and assets/
+                original_cwd = os.getcwd()
+                os.chdir(rvc_repo)
+
+                # Set env vars RVC's Config expects
+                rvc_model_dir = str(Path(self.rvc_model_path).parent)
+                os.environ.setdefault("weight_root", rvc_model_dir)
+                os.environ.setdefault("index_root", rvc_model_dir)
+                os.environ.setdefault("outside_index_root", rvc_model_dir)
+                # rmvpe_root points to the RMVPE model inside the RVC repo
+                os.environ.setdefault("rmvpe_root", os.path.join(rvc_repo, "assets", "rmvpe"))
+
+                # MPS fallback for Apple Silicon
+                os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+                from configs.config import Config
+                from infer.modules.vc.modules import VC
+
+                config = Config()
+                vc = VC(config)
+
+                # get_vc loads the model — expects filename relative to weight_root
+                model_filename = Path(self.rvc_model_path).name
+                vc.get_vc(model_filename, 0.5, self.rvc_protect)
+
+                self._vc = vc
+                self._rvc_loaded = True
+
+                # Restore working directory
                 os.chdir(original_cwd)
-            except Exception:
-                pass
+
+                logger.info(
+                    f"RVC model loaded (version={vc.version}, "
+                    f"tgt_sr={vc.tgt_sr}, model={model_filename})"
+                )
+
+            except Exception as exc:
+                logger.error(f"Failed to load RVC: {exc}")
+                self._vc = None
+                self._rvc_loaded = False
+                # Try to restore cwd even on failure
+                try:
+                    os.chdir(original_cwd)
+                except Exception:
+                    pass
 
         self._initialized = True
 
@@ -183,9 +186,11 @@ class LocalTTS(BaseTTS):
     def _generate_sync(self, text: str, bot_id: str) -> Optional[str]:
         """Blocking Kokoro → (optional RVC) → WAV save."""
         import numpy as np
+        import time
 
         try:
             # --- Kokoro TTS ---
+            t0 = time.perf_counter()
             audio_segments: list[np.ndarray] = []
             for _, _, audio in self._kokoro_pipeline(text, voice=self.kokoro_voice):
                 if audio is not None:
@@ -202,19 +207,40 @@ class LocalTTS(BaseTTS):
 
             audio_np = np.concatenate(audio_segments)
             sample_rate = 24000  # Kokoro outputs at 24kHz
+            t_kokoro = time.perf_counter() - t0
 
             # --- Optional RVC voice conversion ---
-            if self._rvc_loaded and self._vc is not None:
+            if self._rvc_loaded and self._vc is not None and self._rvc_enabled:
+                t1 = time.perf_counter()
                 audio_np, sample_rate = self._apply_rvc(audio_np, sample_rate)
+                t_rvc = time.perf_counter() - t1
+            else:
+                t_rvc = 0.0
+
+            # --- Resample to 24kHz if RVC output at 48kHz ---
+            # Chrome's decodeAudioData is faster with smaller files
+            if sample_rate != 24000 and len(audio_np) > 0:
+                t2 = time.perf_counter()
+                import scipy.signal
+                audio_np = scipy.signal.resample_poly(
+                    audio_np, 24000, sample_rate
+                ).astype(np.float32)
+                sample_rate = 24000
+                t_resample = time.perf_counter() - t2
+            else:
+                t_resample = 0.0
 
             # --- Save WAV ---
+            t3 = time.perf_counter()
             filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
             filepath = self.audio_dir / filename
             self._save_wav(audio_np, filepath, sample_rate=sample_rate)
+            t_save = time.perf_counter() - t3
 
             logger.info(
                 f"Local TTS: {filename} ({len(audio_np)} samples, "
-                f"{sample_rate}Hz) for bot {bot_id}"
+                f"{sample_rate}Hz) kokoro={t_kokoro:.2f}s rvc={t_rvc:.2f}s "
+                f"resample={t_resample:.2f}s save={t_save:.2f}s"
             )
             return filename
 

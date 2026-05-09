@@ -138,10 +138,12 @@ def create_app(settings: Optional[GmeetSettings] = None) -> GmeetServer:
             rvc_filter_radius=settings.rvc_filter_radius,
             rvc_rms_mix_rate=settings.rvc_rms_mix_rate,
             rvc_protect=settings.rvc_protect,
+            rvc_enabled=settings.rvc_enabled,
             kokoro_voice=settings.kokoro_voice,
             audio_dir=settings.audio_dir,
         )
-        logger.info("TTS: Local Kokoro+RVC")
+        label = "Kokoro+RVC" if settings.rvc_enabled else "Kokoro (no RVC)"
+        logger.info(f"TTS: Local {label}")
     else:
         from .tts.elevenlabs import ElevenLabsTTS
         tts = ElevenLabsTTS(
