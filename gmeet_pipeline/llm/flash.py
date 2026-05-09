@@ -95,15 +95,24 @@ class FlashLLM(BaseLLM):
             system_prompt = _HANK_BOB_PERSONA
 
         messages = [{"role": "system", "content": system_prompt}]
-        # Recent conversation context (last 20 turns)
+        # Recent conversation context (last 20 turns), merging consecutive same-role messages
+        # (required for mlx_lm.server which rejects user→user without assistant in between)
         for msg in conversation[-20:]:
-            messages.append(msg)
-        # The new user message — prepend /no_think for Qwen3 thinking models
+            if messages and messages[-1]["role"] == msg["role"]:
+                messages[-1]["content"] += "\n" + msg["content"]
+            else:
+                messages.append(msg)
+        # The new user message — merge if same role, prepend /no_think for Qwen3
         no_think_prefix = "/no_think\n" if self.no_think else ""
-        messages.append({"role": "user", "content": f"{no_think_prefix}{message}"})
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] += "\n" + f"{no_think_prefix}{message}"
+        else:
+            messages.append({"role": "user", "content": f"{no_think_prefix}{message}"})
 
         try:
             t0 = asyncio.get_event_loop().time()
+
+            logger.info("FlashLLM messages: %s", [(m["role"], m["content"][:40]) for m in messages])
 
             # Use configured base_url (local server or OpenRouter)
             base_url = self.base_url

@@ -780,8 +780,10 @@ async function pollAudio() {
       lastAudioCount = 0;
     }
     if (items.length > lastAudioCount) {
-      const latest = items[items.length - 1];
-      if (latest && latest.filename) await playAudio(latest.filename, latest.text);
+      const newItems = items.slice(lastAudioCount);
+      for (const item of newItems) {
+        if (item && item.filename) playAudio(item.filename, item.text);
+      }
       lastAudioCount = items.length;
     }
   } catch (e) {}
@@ -849,9 +851,15 @@ function stopAllAudio() {
   debug('stop command received');
 }
 
-async function playAudio(filename, text) {
-  if (isSpeaking) return;
+let audioPlayQueue = [];
+let isPlayingFromQueue = false;
+
+async function playFromQueue() {
+  if (isPlayingFromQueue || audioPlayQueue.length === 0) return;
+  isPlayingFromQueue = true;
   isSpeaking = true;
+  const { filename, text } = audioPlayQueue.shift();
+
   updatePipelineUI('speaking');
   responseTextEl.textContent = text || '';
 
@@ -877,20 +885,35 @@ async function playAudio(filename, text) {
     currentSource = source;
 
     source.onended = () => {
-      isSpeaking = false;
       currentSource = null;
-      updatePipelineUI('idle');
-      setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
+      isPlayingFromQueue = false;
+      if (audioPlayQueue.length > 0) {
+        playFromQueue();
+      } else {
+        isSpeaking = false;
+        updatePipelineUI('idle');
+        setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
+      }
     };
 
     source.start(0);
-    debug('playing ' + audioBuffer.duration.toFixed(1) + 's audio');
+    debug('playing ' + audioBuffer.duration.toFixed(1) + 's audio (queue=' + audioPlayQueue.length + ')');
   } catch (e) {
     debug('audio_error: ' + (e?.message || e));
-    isSpeaking = false;
     currentSource = null;
-    updatePipelineUI('idle');
+    isPlayingFromQueue = false;
+    if (audioPlayQueue.length > 0) {
+      playFromQueue();
+    } else {
+      isSpeaking = false;
+      updatePipelineUI('idle');
+    }
   }
+}
+
+async function playAudio(filename, text) {
+  audioPlayQueue.push({ filename, text });
+  playFromQueue();
 }
 
 updatePipelineUI('idle');
