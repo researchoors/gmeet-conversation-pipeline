@@ -81,15 +81,23 @@ class FlashLLM(BaseLLM):
             system_prompt = _HANK_BOB_PERSONA
 
         messages = [{"role": "system", "content": system_prompt}]
-        # Recent conversation context (last 20 turns)
+        # Recent conversation context (last 20 turns), merging consecutive same-role messages
+        # (required for mlx_lm.server which rejects user→user without assistant in between)
         for msg in conversation[-20:]:
-            messages.append(msg)
-        # The new user message
-        messages.append({"role": "user", "content": message})
+            if messages and messages[-1]["role"] == msg["role"]:
+                messages[-1]["content"] += "\n" + msg["content"]
+            else:
+                messages.append(msg)
+        # The new user message — merge if same role (required for mlx_lm.server)
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] += "\n" + message
+        else:
+            messages.append({"role": "user", "content": message})
 
         try:
             t0 = asyncio.get_event_loop().time()
 
+            logger.info("FlashLLM messages: %s", [(m["role"], m["content"][:40]) for m in messages])
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",

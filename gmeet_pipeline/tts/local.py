@@ -219,7 +219,9 @@ class LocalTTS(BaseTTS):
             # --- Save WAV ---
             filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
             filepath = self.audio_dir / filename
-            self._save_wav(audio_np, filepath, sample_rate=22050)
+            # Kokoro outputs at 24kHz; use that for correct WAV header
+            sample_rate = 24000
+            self._save_wav(audio_np, filepath, sample_rate=sample_rate)
 
             logger.info(
                 f"Local TTS: {filename} ({len(audio_np)} samples) for bot {bot_id}"

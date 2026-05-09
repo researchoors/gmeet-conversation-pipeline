@@ -524,14 +524,19 @@ async function initAudio() {
     if (audioCtx.state === 'suspended') await audioCtx.resume();
     return;
   }
-  audioCtx = new AudioContext();
-  if (audioCtx.state === 'suspended') {
-    const tryResume = async () => {
-      try { await audioCtx.resume(); } catch(e) {}
-      if (audioCtx.state === 'suspended') setTimeout(tryResume, 100);
-    };
-    tryResume();
-  }
+  // Use explicit 24000 Hz to match Kokoro output + WAV header
+  audioCtx = new AudioContext({ sampleRate: 24000 });
+  // Autoplay workaround: headless Chromium starts AudioContext suspended.
+  // resume() works without user gesture when called from a user gesture handler,
+  // but in headless mode there's no user. We try resume() aggressively.
+  const tryResume = async () => {
+    try { await audioCtx.resume(); } catch(e) { console.warn('[HankBob] resume failed:', e); }
+    if (audioCtx.state === 'suspended') setTimeout(tryResume, 200);
+  };
+  tryResume();
+  // Also resume on any future interaction events (even simulated ones)
+  document.addEventListener('click', tryResume, { once: false });
+  document.addEventListener('keydown', tryResume, { once: false });
 }
 
 function debug(msg) {
@@ -574,9 +579,12 @@ async function pollAudio() {
     if (!resp.ok) return;
     const data = await resp.json();
     const items = data.items || [];
+    // Play all new items sequentially via the queue
     if (items.length > lastAudioCount) {
-      const latest = items[items.length - 1];
-      if (latest && latest.filename) await playAudio(latest.filename, latest.text);
+      const newItems = items.slice(lastAudioCount);
+      for (const item of newItems) {
+        if (item && item.filename) playAudio(item.filename, item.text);
+      }
       lastAudioCount = items.length;
     }
   } catch (e) {}
@@ -615,10 +623,14 @@ async function pollSessionState() {
     }
   } catch (e) {}
 }
+let audioPlayQueue = [];
+let isPlayingFromQueue = false;
 
-async function playAudio(filename, text) {
-  if (isSpeaking) return;
-  isSpeaking = true;
+async function playFromQueue() {
+  if (isPlayingFromQueue || audioPlayQueue.length === 0) return;
+  isPlayingFromQueue = true;
+  const { filename, text } = audioPlayQueue.shift();
+
   updatePipelineUI('speaking');
   responseTextEl.textContent = text || '';
 
@@ -637,20 +649,34 @@ async function playAudio(filename, text) {
     currentSource = source;
 
     source.onended = () => {
-      isSpeaking = false;
       currentSource = null;
-      updatePipelineUI('idle');
-      setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
+      isPlayingFromQueue = false;
+      // Play next in queue if any
+      if (audioPlayQueue.length > 0) {
+        playFromQueue();
+      } else {
+        updatePipelineUI('idle');
+        setTimeout(() => { responseTextEl.textContent = ''; }, 3000);
+      }
     };
 
     source.start(0);
-    debug('playing ' + audioBuffer.duration.toFixed(1) + 's audio');
+    debug('playing ' + audioBuffer.duration.toFixed(1) + 's audio (queue=' + audioPlayQueue.length + ')');
   } catch (e) {
     debug('audio_error: ' + (e?.message || e));
-    isSpeaking = false;
     currentSource = null;
-    updatePipelineUI('idle');
+    isPlayingFromQueue = false;
+    if (audioPlayQueue.length > 0) {
+      playFromQueue();
+    } else {
+      updatePipelineUI('idle');
+    }
   }
+}
+
+async function playAudio(filename, text) {
+  audioPlayQueue.push({ filename, text });
+  playFromQueue();
 }
 
 updatePipelineUI('idle');

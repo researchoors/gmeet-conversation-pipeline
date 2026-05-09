@@ -106,6 +106,29 @@ class GmeetServer:
         )
         self._register_routes()
 
+    async def _poll_bot_status(self, bot_id: str):
+        """Poll Recall API for bot status until it's in-call or failed."""
+        in_call_codes = {"in_meeting", "in_call_recording", "in_call_not_recording"}
+        terminal_codes = {"ended", "call_ended", "done", "fatal", "leaving_call"}
+        for attempt in range(30):  # ~90 seconds max
+            await asyncio.sleep(3)
+            session = self.registry.get(bot_id)
+            if not session or session.status in terminal_codes:
+                return
+            try:
+                status = await self.transport.get_status(bot_id)
+                if status:
+                    logger.info(f"Bot {bot_id[:8]} poll status: {status}")
+                    session.status = status
+                    if status in in_call_codes:
+                        logger.info(f"Bot {bot_id[:8]} confirmed in call via poll")
+                        self.webhook_handler._ensure_worker(bot_id)
+                        return
+                    if status in terminal_codes:
+                        return
+            except Exception as e:
+                logger.warning(f"Status poll error for {bot_id[:8]}: {e}")
+
     def _register_routes(self):
         app = self.app
 
@@ -169,6 +192,12 @@ class GmeetServer:
 
             session = await self.registry.create(bot_id, meeting_url)
             logger.info(f"Bot {bot_id} created, joining {meeting_url}")
+
+            # Start background task to poll bot status until in-call
+            asyncio.create_task(
+                self._poll_bot_status(bot_id), name=f"status-poll-{bot_id[:8]}"
+            )
+
             return {"bot_id": bot_id, "status": "joining", "data": data}
 
         @app.post("/api/bot/{bot_id}/leave")

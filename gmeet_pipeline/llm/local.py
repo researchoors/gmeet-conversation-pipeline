@@ -146,8 +146,31 @@ class LocalLLM(BaseLLM):
 
     @staticmethod
     def _strip_thinking(text: str) -> str:
-        """Remove Qwen3 <think>...</think> blocks from text."""
-        return re.sub(r'<think\b[^>]*>.*?</think\s*>', '', text, flags=re.DOTALL).strip()
+        """Remove thinking/reasoning blocks from LLM output.
+
+        Handles multiple formats:
+        - Qwen3: <think ...>...</think >
+        - Qwen3.5: <|channel|>analysis<|message|>...<|end|> then <|channel|>final<|message|>actual
+        - Any residual <|token|> control tokens
+        """
+        # 1. Strip Qwen3 <think >...</think > blocks
+        text = re.sub(r'<think\b[^>]*>.*?</think\s*>', '', text, flags=re.DOTALL)
+
+        # 2. Extract Qwen3.5 <|channel|>final<|message|> content if present
+        final_match = re.search(
+            r'<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|$)', text, re.DOTALL
+        )
+        if final_match:
+            text = final_match.group(1).strip()
+        else:
+            # 3. Strip any <|channel|>...<|end|> blocks (analysis, etc.)
+            text = re.sub(
+                r'<\|channel\|>\w+<\|message\|>.*?<\|end\|>', '', text, flags=re.DOTALL
+            )
+            # 4. Clean up residual special tokens
+            text = re.sub(r'<\|[^>]+\|>', '', text)
+
+        return text.strip()
 
     async def generate(
         self,
